@@ -4,7 +4,7 @@
 //! using the [`wgpu`] crate and its functions.
 
 #![allow(dead_code)]
-use std::{error::Error, path::Path};
+use crate::coding::Shader;
 use wgpu::util::DeviceExt;
 
 /// Contains all the functions to interact with the GPU device in the machine.
@@ -157,7 +157,7 @@ impl Executor<'_> {
         self.device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: self.label,
-                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&shader.content)),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(shader.get_content())),
             })
     }
 

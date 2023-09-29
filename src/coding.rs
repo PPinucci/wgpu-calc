@@ -1,3 +1,5 @@
+use std::{error::Error, path::Path};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shader {
     content: String,
@@ -110,5 +112,9 @@ impl Shader {
     /// ```
     pub fn replace(&mut self, from: &str, to: &str) {
         self.content = self.content.replace(from, to);
+    }
+
+    pub fn get_content(&self) -> &str {
+        &self.content
     }
 }

@@ -10,7 +10,7 @@ use crate::errors::VariableError;
 use std::error::Error;
 use std::fmt::Debug;
 
-use crate::interface::Shader;
+use crate::coding::Shader;
 pub struct Algorithm<'a, V: Variable> {
     // are we sure? Probably better to keep a sequence of operations, which can be translated to 
     variables: Vec<V>,
