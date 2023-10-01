@@ -8,7 +8,7 @@ use std::error::Error;
 
 pub struct Solver<'a> {
     executor: Executor<'a>,
-    operations: Option<Vec<Operation<'a>>>,
+    operations: Option<Vec<Calculation<'a>>>,
     label: Option<&'a str>,
     // add compute_pass and command_encoders?
 }
@@ -27,13 +27,13 @@ impl<'a> Solver<'a> {
         })
     }
 
-    pub fn add_operation(&mut self, operation: Operation<'a>) -> Result<(), Box<dyn Error>> {
+    pub fn add_operation(&mut self, operation: Calculation<'a>) -> Result<(), Box<dyn Error>> {
         // let mut existing_operations = self.operations.take();
         if let Some(thing) = self.operations.as_mut() {
             thing.push(operation)
         } else {
             match operation {
-                Operation::Pipeline { .. } => {
+                Calculation::Pipeline { .. } => {
                     return Err(Box::new(OperationError::BindingNotPresent(
                         self.label.unwrap().to_string(),
                     )));
@@ -48,7 +48,7 @@ impl<'a> Solver<'a> {
     }
 }
 
-pub enum Operation<'a> {
+pub enum Calculation<'a> {
     /// This [`Operation`] binds a bind group, initiates the pipeline and dispatches the calculation
     BindAndPipeline {
         bind_group: wgpu::BindGroup,
@@ -61,7 +61,7 @@ pub enum Operation<'a> {
         workgroup: [u32; 3],
     },
     Parallel {
-        operations: Vec<Operation<'a>>,
+        operations: Vec<Calculation<'a>>,
     },
     BufferWrite {
         buffer: wgpu::Buffer,
@@ -69,7 +69,7 @@ pub enum Operation<'a> {
     },
 }
 
-impl<'a> Operation<'_> {
+impl<'a> Calculation<'_> {
     pub(crate) fn from_bind_and_pipeline_descriptors(
         bind_desc: &wgpu::BindGroupDescriptor,
         pipeline_descriptor: &wgpu::ComputePipelineDescriptor,
@@ -78,7 +78,7 @@ impl<'a> Operation<'_> {
     ) -> Self {
         let bind_group = executor.get_bind_group(bind_desc);
         let pipeline = executor.get_pipeline(pipeline_descriptor);
-        Operation::BindAndPipeline {
+        Calculation::BindAndPipeline {
             bind_group,
             pipeline,
             workgroup,
@@ -90,7 +90,7 @@ impl<'a> Operation<'_> {
         compute_pass: &'a mut wgpu::ComputePass<'a>,
     ) -> Result<(), Box<dyn Error>> {
         match self {
-            Operation::BindAndPipeline {
+            Calculation::BindAndPipeline {
                 bind_group,
                 pipeline,
                 workgroup,
@@ -99,17 +99,17 @@ impl<'a> Operation<'_> {
                 compute_pass.set_pipeline(pipeline);
                 compute_pass.dispatch_workgroups(workgroup[0], workgroup[1], workgroup[2])
             }
-            Operation::Pipeline {
+            Calculation::Pipeline {
                 pipeline,
                 workgroup,
             } => {
                 compute_pass.set_pipeline(pipeline);
                 compute_pass.dispatch_workgroups(workgroup[0], workgroup[1], workgroup[2])
             }
-            Operation::Parallel { .. } => {
+            Calculation::Parallel { .. } => {
                 return Err(Box::new(OperationError::ComputePassOnParallel))
             }
-            Operation::BufferWrite { .. } => {
+            Calculation::BufferWrite { .. } => {
                 return Err(Box::new(OperationError::ComputePassOnBuffer));
             }
         }

@@ -24,10 +24,7 @@ pub mod algorithm;
 pub mod errors;
 pub mod interface;
 pub mod solver;
-pub mod translator;
 pub mod coding;
 
 #[cfg(test)]
-mod unit_tests {
-    // use super::*;
-}
+mod tests;
