@@ -5,7 +5,7 @@
 //!
 #![allow(dead_code)]
 use wgpu::BufferDescriptor;
-use anyhow;
+use anyhow::{self, Ok};
 
 use crate::errors::VariableError;
 use crate::solver::Solver;
@@ -15,7 +15,7 @@ use std::fmt::Debug;
 use crate::coding::Shader;
 pub struct Algorithm<'a,V:Variable> {
     variables: Option<&'a V>, // are we sure it's useful? 
-    operations: Vec<Operation>
+    operations: Vec<Operation<'a,V>>
 }
 
 pub struct Function<'a, V: Variable> {
@@ -37,8 +37,11 @@ where
     pub bind_group: u32,
 }
 
-enum Operation{
-    SerialComplete,
+enum Operation<'a,V:Variable>{
+    BufferWrite{buffers:Vec<wgpu::BufferDescriptor<'a>>},
+    Bind{descriptor: Vec<VariableBind<'a,V>>},
+    Execute{shader:Shader,entry:&'a str},
+    Parallel(Vec<Operation<'a,V>>)
 }
 
 impl<V:Variable> Algorithm<'_,V>
@@ -55,11 +58,25 @@ where
     /// 
     /// This function takes the [`Function`] and translate it into [`Operation`], at the same time optimizing
     /// the calculation pipeline
-    pub fn add_function(&mut self, _function:Function<V>) 
+    pub fn add_function(&mut self, function:Function<V>) 
     where
         V: Variable
     {
-       todo!()
+       let mut b_write: Operation<'_, V> = Operation::BufferWrite { buffers: Vec::new() };
+       let f_var = function.variables;
+
+       for var in f_var {
+        let var_pos = self.variables
+        .iter()
+        .position(|&existing_var| existing_var == var.get_variable());
+    
+        if var_pos.is_none() {
+            b_write.add_buffer(var.get_variable()).unwrap()
+        }
+
+
+
+       }
     }
 
     /// Consumes the [`Algorithm`] and gives back a [`Solver`]
@@ -138,6 +155,31 @@ where
         self.variable
     }
 }
+
+impl<'a,V:Variable> Operation<'a,V> {
+
+    fn add_buffer(&mut self, var:&'a V)->Result<(), anyhow::Error> {
+        match self {
+            Operation::BufferWrite { buffers } => {
+                let descriptor = wgpu::BufferDescriptor{ 
+                    label: var.get_name(), 
+                    size: var.byte_size(), 
+                    usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC, 
+                    mapped_at_creation: false
+                };
+
+                buffers.push(descriptor);
+                return Ok(());
+            },
+            _ => { Err(anyhow::anyhow!("Trying to add a buffer to any Operation other than BufferWrite"))}
+        }
+        
+    }
+    
+}
+
 pub trait Variable
 where
     Self: PartialEq +Debug,
@@ -156,6 +198,8 @@ where
                 | wgpu::BufferUsages::COPY_SRC,
         };
     }
+
+    fn get_name(&self)->Option<&str>;
 
     /// This function calculates the byte size of the object
     /// 
