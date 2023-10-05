@@ -12,7 +12,7 @@ struct GpuArray2<'a> {
 }
 
 impl<'a> GpuArray2<'a> {
-    fn new(array: &'a Array2<f32>, name:&str) -> GpuArray2<'a> {
+    fn new(array: &'a Array2<f32>, name:&'a str) -> GpuArray2<'a> {
         let (n_cols, n_rows) = array.dim();
         let data = array.as_slice().unwrap();
         Self {
@@ -67,7 +67,7 @@ fn add_test(){
     let function = Function::new(&shader, "add", &bindings);
 
     let mut algorithm = Algorithm::new();
-    algorithm.add_function(function);
+    algorithm.add_function(&function);
 
     // let solver = algorithm.finish();
 

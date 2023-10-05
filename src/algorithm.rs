@@ -9,7 +9,7 @@ use anyhow::{self, Ok};
 
 use crate::errors::VariableError;
 use crate::solver::Solver;
-use std::error::Error;
+// use std::error::Error;
 use std::fmt::Debug;
 
 use crate::coding::Shader;
@@ -33,8 +33,9 @@ pub struct VariableBind<'a, V>
 where
     V: Variable,
 {
-    pub variable: &'a V,
-    pub bind_group: u32,
+    variable: &'a V,
+    bind_group: u32,
+    mutable: bool
 }
 
 enum Operation<'a,V:Variable>{
@@ -58,14 +59,14 @@ where
     /// 
     /// This function takes the [`Function`] and translate it into [`Operation`], at the same time optimizing
     /// the calculation pipeline
-    pub fn add_function(&mut self, function:Function<V>) 
+    pub fn add_function(&mut self, function:&Function<V>) 
     where
         V: Variable
     {
        let mut b_write: Operation<'_, V> = Operation::BufferWrite { buffers: Vec::new() };
-       let f_var = function.variables;
+       let f_var = &function.variables;
 
-       for var in f_var {
+       f_var.into_iter().for_each(|var| {
         let var_pos = self.variables
         .iter()
         .position(|&existing_var| existing_var == var.get_variable());
@@ -76,13 +77,13 @@ where
 
 
 
-       }
+       });
     }
 
     /// Consumes the [`Algorithm`] and gives back a [`Solver`]
     /// 
     /// 
-    pub fn finish(self) -> Result<Solver<'static>,Box<dyn Error>> {
+    pub fn finish(self) -> Result<Solver<'static>,anyhow::Error> {
         todo!()
     }
 }
@@ -128,6 +129,7 @@ where
         Self {
             variable: self.variable.clone(),
             bind_group: self.bind_group.clone(),
+            mutable:self.mutable.clone(),
         }
     }
 }
@@ -140,11 +142,36 @@ where
     /// 
     /// This associated the variable, and thus will associate the correct buffer, to the
     /// bind group which has `bind_group` value inside the shader code.
+    /// The variable is set as "mutable" by default, as it is considered [`unsafe`] for it to be immutable.
+    /// To set as immuable use [`VariableBind::set_immutable`] method.
+    /// Read [`VariableBind::is_mutable`] method for further explanation
+    /// # Arguments
+    /// * - `variable` - a reference to the variable to bind
+    /// * - `bind_group` - the bind group number the variabe will be associated with
     pub fn new<'a>(variable: &'a V, bind_group: u32) -> VariableBind<'a, V> {
         VariableBind {
             variable,
             bind_group,
+            mutable:true,
         }
+    }
+
+    /// This method returns weather the variable is mutable or not.
+    /// 
+    /// When the variable is set as immutable, it is supposed not to vary during GPU operation,
+    /// i.e. it's a [`Variable`] which will be read only and never wrote to.
+    pub fn is_mutable(&self)->bool{
+        self.mutable
+    }
+    
+    /// Sets the [`VariableBind`] to be immutable, thus read only
+    /// 
+    /// It is not unsafe per se, but set as such to warn about the possible implications of this.
+    /// At the time of writing any variable can be set as read/write and set as immutable. This could potentially
+    /// cause concurrency problems when queueing the pipelines on tha GPU.
+    /// An immutable [`VariableBind`] is considered not to change during the calculation.
+    pub unsafe fn set_immutable(&mut self){
+        self.mutable = false
     }
 
     /// gets the [`Variable`] from the [`VariableBind`]
@@ -229,7 +256,7 @@ where
     /// This method defines the workgroup count for the object
     /// 
     /// It takes the dimension of the object and 
-    fn get_workgroup(&self) -> Result<[u32; 3], Box<dyn Error + '_>>
+    fn get_workgroup(&self) -> Result<[u32; 3], anyhow::Error>
     where
         Self: Debug,
     {
@@ -241,15 +268,15 @@ where
                 (0..=65535, _) => workgroup[id] = dimensions[id],
                 (65536..=4194240, _) => {
                     // error to convey workgoup number for i, convey also the dimension which gave the error
-                    return Err(Box::new(VariableError::<u32>::WorkgroupDimensionError(
+                    return Err(VariableError::<u32>::WorkgroupDimensionError(
                         id as u32,
-                    )));
+                    ).into());
                 }
                 (4194241..=16776960, 1 | 2) => {
                     // same as above
-                    return Err(Box::new(VariableError::<u32>::WorkgroupDimensionError(
+                    return Err(VariableError::<u32>::WorkgroupDimensionError(
                         id as u32,
-                    )));
+                    ).into());
                 }
                 _ => {
                     // fatal error not possible to instantiate element, too big

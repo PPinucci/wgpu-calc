@@ -3,7 +3,6 @@
 //! Hopefully like this errors are easier to catch and manage from another crate
 
 use std::fmt::Debug;
-
 use thiserror::Error;
 
 type GpuResult<T> = Result<T, SizeError>;
