@@ -21,10 +21,10 @@ For this reason the intermediate poll of a result is possible, but not suggested
 use wasm_bindgen::prelude::*;
 
 pub mod algorithm;
+pub mod coding;
 pub mod errors;
 pub mod interface;
 pub mod solver;
-pub mod coding;
 
 #[cfg(test)]
 mod tests;

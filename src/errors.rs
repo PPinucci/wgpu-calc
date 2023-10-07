@@ -5,13 +5,16 @@
 use std::fmt::Debug;
 use thiserror::Error;
 
-type GpuResult<T> = Result<T, SizeError>;
+// type GpuResult<T> = Result<T, SizeError>;
 
-#[derive(Debug, Error)]
-pub enum SizeError {
-    #[error("OFirst operand has dimensions {:?}, second operand has dimension {:?}. The expected dimensions of the second operand are {:?}", [0], [1],[2])]
-    DimensionError((usize, usize), (usize, usize), (usize, usize)),
-}
+/// These errors deals with the size of the operands of a function
+/// 
+/// They can be raised if the dimen
+// #[derive(Debug, Error)]
+// pub enum SizeError {
+//     #[error("First operand has dimensions {:?}, second operand has dimension {:?}. The expected dimensions of the second operand are {:?}", [0], [1],[2])]
+//     DimensionError((usize, usize), (usize, usize), (usize, usize)),
+// }
 
 #[derive(Debug, Error)]
 pub enum OperationError {
