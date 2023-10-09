@@ -8,7 +8,7 @@ use thiserror::Error;
 // type GpuResult<T> = Result<T, SizeError>;
 
 /// These errors deals with the size of the operands of a function
-/// 
+///
 /// They can be raised if the dimen
 // #[derive(Debug, Error)]
 // pub enum SizeError {

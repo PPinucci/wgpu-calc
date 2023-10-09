@@ -18,7 +18,7 @@ impl<'a> Solver<'a> {
     ///
     /// When builted the struct contains the [`Executor`], but an empty set of operations.
     /// The operations can than be added with the [`Executor::add_operation()`] method.
-    pub async fn new(label: Option<&str>) -> Result<Solver<'_>, Box<dyn Error>> {
+    pub async fn new(label: Option<&str>) -> Result<Solver<'_>, anyhow::Error> {
         let executor = Executor::new(label).await?;
         Ok(Solver {
             label,

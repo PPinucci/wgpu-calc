@@ -62,7 +62,7 @@ fn add_test() {
 
     let function = Function::new(&shader, "add", &bindings);
 
-    let mut algorithm = Algorithm::new();
+    let mut algorithm = Algorithm::new(Some("Test algorithm"));
     algorithm.add_function(&function);
 
     // let solver = algorithm.finish();

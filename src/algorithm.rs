@@ -4,18 +4,19 @@
 //! GPU doing the job itself.
 //!
 #![allow(dead_code)]
-use anyhow::{self, Ok};
+use anyhow;
 use wgpu::BufferDescriptor;
 
 use crate::errors::VariableError;
 use crate::solver::Solver;
-// use std::error::Error;
 use std::fmt::Debug;
 
 use crate::coding::Shader;
 pub struct Algorithm<'a, V: Variable> {
-    variables: Vec<&'a VariableBind<'a, V>>, // are we sure it's useful?
-    operations: Vec<Operation<'a, V>>,
+    variables: Vec<&'a VariableBind<'a, V>>,
+    modules: Vec<Module<'a>>,
+    operations: Vec<Operation>,
+    label: Option<&'a str>,
 }
 
 pub struct Function<'a, V: Variable> {
@@ -23,8 +24,9 @@ pub struct Function<'a, V: Variable> {
     entry_point: &'a str,
     variables: Vec<VariableBind<'a, V>>,
 }
-
+#[derive(Debug)]
 pub struct Mutable;
+#[derive(Debug)]
 pub struct Immutable;
 
 #[derive(Debug, PartialEq)]
@@ -40,29 +42,36 @@ where
     bind_group: u32,
     mutable: std::marker::PhantomData<Type>,
 }
+#[derive(Debug, PartialEq)]
+pub(super) struct Module<'a> {
+    shader: &'a Shader,
+    entry_point: Vec<&'a str>,
+}
 
-enum Operation<'a, V: Variable> {
+#[derive(Debug)]
+enum Operation {
     BufferWrite {
-        buffers: Vec<wgpu::BufferDescriptor<'a>>,
+        variable_index: usize,
     },
     Bind {
-        descriptor: Vec<&'a VariableBind<'a, V>>,
+        bind_index: usize,
     },
     Execute {
-        shader: &'a Shader,
-        entry: &'a str,
+        module_index: usize,
+        entry_point_index: usize,
     },
-    Parallel(Vec<Operation<'a, V>>),
 }
 
 impl<'a, V: Variable> Algorithm<'a, V> {
     /// Creates a new empty [`Algorithm`]
     ///
     /// The [`Algorithm`] will not be instantiated with any [`Operation`], will just be empty
-    pub fn new() -> Self {
+    pub fn new(label: Option<&'a str>) -> Self {
         Algorithm {
             operations: Vec::new(),
             variables: Vec::new(),
+            modules: Vec::new(),
+            label,
         }
     }
 
@@ -70,74 +79,72 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     ///
     /// This function takes the [`Function`] and translate it into [`Operation`], at the same time optimizing
     /// the calculation pipeline
-    /// 
+    ///
     /// # Panics
-    /// - if the previous function only resulted in a [`Operation::Bind`] since this should 
+    /// - if the previous function only resulted in a [`Operation::Bind`] since this should
     ///     always followed by a [`Operation::Execute`]
     pub fn add_function(&'a mut self, function: &'a Function<V>)
     where
         V: Variable,
     {
-        let mut b_write: Operation<'_, V> = Operation::BufferWrite {
-            buffers: Vec::new(),
-        };
-        let mut bind: Operation<'_, V> = Operation::Bind {
-            descriptor: Vec::new(),
-        };
         let f_var = &function.variables;
 
-        // For each variable in the function gets the position of the same variable
-        // in the Algorithm Funcion list (if present)
-        f_var.into_iter().for_each(|var| {
-            let var_pos = self
+        for var in f_var {
+            if let Some(pos) = self
                 .variables
                 .iter()
-                .position(|&existing_var| existing_var == var);
-            // If the variable is present, than if the bind group is different adds a
-            // new bind variable
-            if let Some(position) = var_pos {
-                if var.get_bind() != self.variables[position].get_bind() {
-                    bind.add_bind(var).unwrap();
+                .position(|&existing_var| existing_var == var)
+            {
+                if var.get_bind() != var.get_bind() && var.is_mutable() {
+                    self.variables.push(var);
+                    self.operations.push(Operation::Bind { bind_index: pos });
                 }
             } else {
-                // if variable is not present it adds to the list and create a buffer write o
-                // of it
-                b_write.add_buffer(var.get_variable()).unwrap();
                 self.variables.push(var);
+                let index = self.variables.len() - 1;
+                self.operations.push(Operation::BufferWrite {
+                    variable_index: index,
+                });
+                self.operations.push(Operation::Bind { bind_index: index });
             }
-        });
-        
-        let exe: Operation<'a, V> = Operation::Execute {
-            shader: function.shader,
-            entry: function.entry_point,
-        };
+        }
 
-        if let Some(mut last_op) = self.operations.last() {
-            match last_op {
-                Operation::Bind { .. } => {
-                    panic!("Somethig went wrong on the last function push, it was only a binding without any execution")
-                }
-                Operation::BufferWrite { buffers } => {
-                    todo!()
-                }
-                Operation::Parallel(ops) => {
-                    todo!()
-                }
-                Operation::Execute { shader, entry } => {
-                    todo!()
-                }
+        if let Some(pos) = self
+            .modules
+            .iter()
+            .position(|existing_module| existing_module.shader == function.shader)
+        {
+            if let Some(index) = self.modules[pos].find_entry_point(function.entry_point) {
+                self.operations.push(Operation::Execute {
+                    module_index: pos,
+                    entry_point_index: index,
+                })
+            } else {
+                self.modules[pos].add_entry_point(function.entry_point);
+                self.operations.push(Operation::Execute {
+                    module_index: pos,
+                    entry_point_index: self.modules[pos].entry_point.len() - 1,
+                })
             }
         } else {
-            self.operations.push(b_write);
-            self.operations.push(bind);
-            self.operations.push(exe);
+            self.modules.push(Module {
+                shader: function.shader,
+                entry_point: vec![function.entry_point],
+            });
         }
     }
 
+    pub fn optimize(&mut self) {
+        todo!()
+    }
     /// Consumes the [`Algorithm`] and gives back a [`Solver`]
     ///
-    ///
-    pub fn finish(self) -> Result<Solver<'static>, anyhow::Error> {
+    /// This is the moement where the machine is asked for a GPU device and the [`Operations`] are
+    /// put in a pipeline after having been optimized
+    pub async fn finish(mut self) -> Result<Solver<'a>, anyhow::Error> {
+        let handle = tokio::spawn(async move { Solver::new(self.label) });
+        self.optimize();
+        let solver = handle.await?;
         todo!()
     }
 }
@@ -275,50 +282,21 @@ impl<V: Variable> PartialEq for VariableBind<'_, V, Mutable> {
     }
 }
 
-impl<'a, V: Variable> Operation<'a, V> {
-    fn add_buffer(&mut self, var: &'a V) -> Result<(), anyhow::Error> {
-        match self {
-            Operation::BufferWrite { buffers } => {
-                let descriptor = wgpu::BufferDescriptor {
-                    label: var.get_name(),
-                    size: var.byte_size(),
-                    usage: wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_DST
-                        | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                };
-
-                buffers.push(descriptor);
-                return Ok(());
-            }
-            _ => Err(anyhow::anyhow!(
-                "Trying to add a buffer to any Operation other than BufferWrite"
-            )),
+impl<'a> Module<'a> {
+    pub(super) fn new(shader: &'a Shader) -> Self {
+        Self {
+            shader,
+            entry_point: Vec::new(),
         }
     }
 
-    fn add_bind(&mut self, var_bind: &'a VariableBind<'a, V>) -> Result<(), anyhow::Error> {
-        match self {
-            Operation::Bind { descriptor } => {
-                descriptor.push(var_bind);
-                return Ok(());
-            }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Trying to add a bind to any Operation other than Bind"
-                ))
-            }
-        }
+    pub(super) fn add_entry_point(&mut self, e_p: &'a str) -> usize {
+        self.entry_point.push(e_p);
+        return self.entry_point.len() - 1;
     }
-    fn len(&self) -> Result<usize, anyhow::Error> {
-        match self {
-            Operation::Execute { .. } => Err(anyhow::anyhow!(
-                "Cannot get length of Execute Operation, only one is present"
-            )),
-            Operation::Bind { descriptor } => Ok(descriptor.len()),
-            Operation::BufferWrite { buffers } => Ok(buffers.len()),
-            Operation::Parallel(ops) => Ok(ops.len()),
-        }
+
+    pub(super) fn find_entry_point(&self, e_p: &'a str) -> Option<usize> {
+        self.entry_point.iter().position(|&entry| entry == e_p)
     }
 }
 
