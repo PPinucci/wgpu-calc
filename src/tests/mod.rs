@@ -1,3 +1,6 @@
+use std::rc::Rc;
+use std::sync::Arc;
+
 use crate::algorithm::{Algorithm, Function, Variable, VariableBind};
 use crate::coding::Shader;
 use bytemuck;
@@ -47,8 +50,8 @@ impl Variable for GpuArray2<'_> {
     }
 }
 
-#[test]
-fn add_test() {
+#[tokio::test]
+async fn add_test() {
     let array = array![[0., 0., 0.], [1., 1., 1.], [2., 2., 2.]];
 
     let var = GpuArray2::new(&array, "test array");
@@ -58,14 +61,16 @@ fn add_test() {
     shader.replace("€cols", ncols.to_string().as_str());
     shader.replace("€nrow", nrows.to_string().as_str());
 
-    let bindings = [VariableBind::new(&var, 0), VariableBind::new(&var, 1)];
+    let bindings = [VariableBind::new(&var, 0,Some("test_variable 1")), VariableBind::new(&var, 1,Some("test_variable 2"))];
 
     let function = Function::new(&shader, "add", &bindings);
 
-    let mut algorithm = Algorithm::new(Some("Test algorithm"));
+    let mut algorithm = Rc::new(Algorithm::new(Some("Test algorithm")));
+    
     algorithm.add_function(&function);
 
-    // let solver = algorithm.finish();
+
+    let executor = algorithm.finish().await.unwrap();
 
     // algorithm.run()
     todo!()

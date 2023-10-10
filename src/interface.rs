@@ -35,7 +35,7 @@ impl Executor<'_> {
     /// # Panics
     /// - if no adapter is found (default settings, should be rare). Limits are furtherly restricted in case this is compiled for wasm32
     /// - if device don't match features and limits (default settings, should be very rare)
-    pub async fn new(label: Option<&str>) -> Result<Executor<'_>, wgpu::RequestDeviceError> {
+    pub async fn new(label: Option<&str>) -> Result<Executor<'_>, anyhow::Error> {
         if let Some(adapter) = Executor::find_adapter().await {
             let (device, queue) = adapter
                 .request_device(
@@ -60,7 +60,7 @@ impl Executor<'_> {
             })
         } else {
             println!("No adapter found for this machine");
-            return Err(wgpu::RequestDeviceError);
+            return Err(wgpu::RequestDeviceError.into());
         }
     }
 
@@ -138,7 +138,7 @@ impl Executor<'_> {
         self.device.create_bind_group(bind_group_descriptor)
     }
 
-    /// This methods gives a Biffer from a [`wgpu::util::BufferInitDescriptor`] object
+    /// This methods gives a Buffer from a [`wgpu::util::BufferInitDescriptor`] object
     ///
     /// It can be useful to be able to build the descriptor unlinked from the executor and
     /// than only get the [`wgpu::Buffer`] only afterwards when the calculation is more ready to be performed
@@ -147,6 +147,16 @@ impl Executor<'_> {
         buffer_init_descriptor: &wgpu::util::BufferInitDescriptor,
     ) -> wgpu::Buffer {
         self.device.create_buffer_init(&buffer_init_descriptor)
+    }
+
+    /// This method gives a buffer from a [`wgpu::BufferDescriptor`]
+    /// 
+    /// 
+    pub fn get_buffer(
+        &self,
+        buffer_descriptor: &wgpu::BufferDescriptor,
+    ) -> wgpu::Buffer {
+        self.device.create_buffer(&buffer_descriptor)
     }
 
     /// This method associates the [`Shader`] object to the executor, creating a module.
@@ -186,6 +196,10 @@ impl Executor<'_> {
         pipeline_descriptor: &wgpu::ComputePipelineDescriptor,
     ) -> wgpu::ComputePipeline {
         self.device.create_compute_pipeline(pipeline_descriptor)
+    }
+
+    pub fn create_encoder(&self, label: Option<&str>)-> wgpu::CommandEncoder {
+        self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label })
     }
 
     /// This method adds a bind group and a pipeline to the [`Executor`] and calls the dispatch for the pipeline
@@ -335,7 +349,7 @@ mod interface_test {
             entry_point,
         };
 
-        let pipeline = executor.get_pipeline(&pipeline_descriptor);
+        let pipeline: wgpu::ComputePipeline = executor.get_pipeline(&pipeline_descriptor);
 
         let command_encoder =
             executor.dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, label);
