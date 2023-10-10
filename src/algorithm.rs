@@ -9,6 +9,7 @@ use wgpu::BufferDescriptor;
 
 use crate::errors::VariableError;
 use crate::interface::Executor;
+use std::borrow::BorrowMut;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 
@@ -175,7 +176,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                         });
                         workgroups = self.variables[*index].variable.get_workgroup()?;
                     }
-                    bind_layout_descriptor.entries = &operation_bind_layout_entries;
+                    
                 }
                 Operation::BufferWrite { variable_index } => {
                     todo!()
@@ -184,6 +185,8 @@ impl<'a, V: Variable> Algorithm<'a, V> {
 
                     let shader = self.modules[*module_index].shader;
                     let entry_point = self.modules[*module_index].entry_point[*entry_point_index];
+
+                    bind_layout_descriptor.entries = &operation_bind_layout_entries;
                     
                     let bind_layout = executor.get_bind_group_layout(&bind_layout_descriptor);
                     let bind_group_desriptor = wgpu::BindGroupDescriptor {
@@ -211,12 +214,9 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     };
                     let pipeline: wgpu::ComputePipeline = executor.get_pipeline(&pipeline_descriptor);
 
-                    let command_encoder = executor.dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, None);
+                    let command_buffer = [executor.dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, None).finish()];
 
-
-                    
-                    
-                    todo!()
+                    executor.execute(command_buffer.into_iter());
                 },
             }
         }
