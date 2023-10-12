@@ -150,12 +150,9 @@ impl Executor<'_> {
     }
 
     /// This method gives a buffer from a [`wgpu::BufferDescriptor`]
-    /// 
-    /// 
-    pub fn get_buffer(
-        &self,
-        buffer_descriptor: &wgpu::BufferDescriptor,
-    ) -> wgpu::Buffer {
+    ///
+    ///
+    pub fn get_buffer(&self, buffer_descriptor: &wgpu::BufferDescriptor) -> wgpu::Buffer {
         self.device.create_buffer(&buffer_descriptor)
     }
 
@@ -198,8 +195,9 @@ impl Executor<'_> {
         self.device.create_compute_pipeline(pipeline_descriptor)
     }
 
-    pub fn create_encoder(&self, label: Option<&str>)-> wgpu::CommandEncoder {
-        self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label })
+    pub fn create_encoder(&self, label: Option<&str>) -> wgpu::CommandEncoder {
+        self.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label })
     }
 
     /// This method adds a bind group and a pipeline to the [`Executor`] and calls the dispatch for the pipeline
@@ -245,6 +243,10 @@ impl Executor<'_> {
         return encoder;
     }
 
+    pub fn write_buffer(&self, buffer: &wgpu::Buffer, data: &[u8]) {
+        self.queue.write_buffer(buffer, 0, data);
+    }
+
     pub fn execute<I: IntoIterator<Item = wgpu::CommandBuffer>>(
         &mut self,
         command_buffers: I,
@@ -266,7 +268,7 @@ mod interface_test {
 
         let workgroups: [u32; 3] = [10000, 1, 1];
 
-        let shader = Shader::from_file_path("./shaders/example_shader.wgsl").unwrap();
+        let shader = Shader::from_file_path("./src/tests/shaders/example_shader.wgsl").unwrap();
         let shader_module = executor.get_shader_module(&shader);
         let entry_point = "add";
 

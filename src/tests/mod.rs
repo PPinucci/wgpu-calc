@@ -1,6 +1,3 @@
-use std::rc::Rc;
-use std::sync::Arc;
-
 use crate::algorithm::{Algorithm, Function, Variable, VariableBind};
 use crate::coding::Shader;
 use bytemuck;
@@ -57,21 +54,24 @@ async fn add_test() {
     let var = GpuArray2::new(&array, "test array");
     let (nrows, ncols) = var.get_dims();
 
-    let mut shader = Shader::from_file_path("./shaders/mat2calcs.pwgsl").unwrap();
+    let mut shader = Shader::from_file_path("./src/tests/shaders/mat2calcs.pwgsl").unwrap();
     shader.replace("€cols", ncols.to_string().as_str());
     shader.replace("€nrow", nrows.to_string().as_str());
 
-    let bindings = [VariableBind::new(&var, 0,Some("test_variable 1")), VariableBind::new(&var, 1,Some("test_variable 2"))];
+    let bindings = [
+        VariableBind::new(&var, 0, Some("test_variable 1")),
+        VariableBind::new(&var, 1, Some("test_variable 2")),
+    ];
 
     let function = Function::new(&shader, "add", &bindings);
 
-    let mut algorithm = Rc::new(Algorithm::new(Some("Test algorithm")));
+    let mut algorithm = Algorithm::new(Some("Test algorithm"));
     
-    algorithm.add_function(&function);
-
+    algorithm.add_function(&function);    
 
     let executor = algorithm.finish().await.unwrap();
 
+
     // algorithm.run()
-    todo!()
 }
+

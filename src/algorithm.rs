@@ -9,11 +9,12 @@ use wgpu::BufferDescriptor;
 
 use crate::errors::VariableError;
 use crate::interface::Executor;
-use std::borrow::BorrowMut;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 
 use crate::coding::Shader;
+
+#[derive(Clone)]
 pub struct Algorithm<'a, V: Variable> {
     variables: Vec<&'a VariableBind<'a, V>>,
     modules: Vec<Module<'a>>,
@@ -45,13 +46,13 @@ where
     buffer_descriptor: wgpu::BufferDescriptor<'a>,
     mutable: std::marker::PhantomData<Type>,
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq,Clone)]
 pub(super) struct Module<'a> {
     shader: &'a Shader,
     entry_point: Vec<&'a str>,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 enum Operation {
     BufferWrite {
         variable_index: usize,
@@ -86,20 +87,23 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// # Panics
     /// - if the previous function only resulted in a [`Operation::Bind`] since this should
     ///     always followed by a [`Operation::Execute`]
-    pub fn add_function(&'a mut self, function: &'a Function<V>)
+    pub fn add_function(&mut self, function: &'a Function<'a,V>)
     where
         V: Variable,
     {
-        let f_var = &function.variables;
-        let mut binds = Operation::Bind { bind_index: Vec::new() };
+        let f_var = function.get_variables();
+        let mut binds = Operation::Bind {
+            bind_index: Vec::new(),
+        };
         for var in f_var {
-            if let Some(pos) = self
+            if let Some(_) = self
                 .variables
                 .iter()
-                .position(|&existing_var| existing_var == var) {
-                    self.variables.push(var);
-                    let index = self.variables.len() - 1;
-                    binds.add_bind(index).unwrap();
+                .position(|&existing_var| existing_var == var)
+            {
+                self.variables.push(var);
+                let index = self.variables.len() - 1;
+                binds.add_bind(index).unwrap();
             } else {
                 self.variables.push(var);
                 let index = self.variables.len() - 1;
@@ -126,7 +130,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 self.modules[pos].add_entry_point(function.entry_point);
                 self.operations.push(Operation::Execute {
                     module_index: pos,
-                    entry_point_index: self.modules[pos].entry_point.len() - 1,
+                    entry_point_index: &self.modules[pos].entry_point.len() - 1,
                 })
             }
         } else {
@@ -144,15 +148,15 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     ///
     /// This is the moement where the machine is asked for a GPU device and the [`Operations`] are
     /// put in a pipeline after having been optimized
-    pub async fn finish(&self) -> Result<Executor<'a>, anyhow::Error> {
+    pub async fn finish(&mut self) -> Result<Executor<'a>, anyhow::Error> {
         let mut executor = Executor::new(self.label).await?;
-        
+
         // self.optimize();
-        
+
         let mut buffers = Vec::new();
-        let mut bind_layout_entries = Vec::new();
+        let mut bind_layout_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
         let mut workgroups = [0 as u32; 3];
-        
+
         for variable in &self.variables {
             buffers.push(executor.get_buffer(&variable.buffer_descriptor));
             bind_layout_entries.push(variable.get_bind_group_layout_entry())
@@ -160,34 +164,42 @@ impl<'a, V: Variable> Algorithm<'a, V> {
 
         let mut operation_bind_layout_entries = Vec::new();
         let mut operation_bind_entries = Vec::new();
-        let mut bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor { 
-            label: None, 
-            entries: &[], 
-        };
 
-        for operation in &self.operations{
+        for operation in &self.operations {
             match operation {
-                Operation::Bind { bind_index } =>{
+                Operation::Bind { bind_index } => {
+                    operation_bind_layout_entries = Vec::new();
+                    operation_bind_entries = Vec::new();
                     for index in bind_index {
+                        // let layout_add = &mut operation_bind_layout_entries;
                         operation_bind_layout_entries.push(bind_layout_entries[*index]);
-                        operation_bind_entries.push(wgpu::BindGroupEntry{
+                        operation_bind_entries.push(wgpu::BindGroupEntry {
                             binding: self.variables[*index].bind_group,
                             resource: buffers[*index].as_entire_binding(),
                         });
                         workgroups = self.variables[*index].variable.get_workgroup()?;
                     }
-                    
+                    continue;
                 }
                 Operation::BufferWrite { variable_index } => {
-                    todo!()
-                },
-                Operation::Execute { module_index, entry_point_index } => {
-
+                    let variable = &self.variables[*variable_index].variable;
+                    let buffer_descriptor = variable.to_buffer_descriptor(None);
+                    let buffer = executor.get_buffer(&buffer_descriptor);
+                    executor.write_buffer(&buffer, variable.byte_data());
+                    continue;
+                }
+                Operation::Execute {
+                    module_index,
+                    entry_point_index,
+                } => {
                     let shader = self.modules[*module_index].shader;
                     let entry_point = self.modules[*module_index].entry_point[*entry_point_index];
 
-                    bind_layout_descriptor.entries = &operation_bind_layout_entries;
-                    
+                    let bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
+                        label: None,
+                        entries: &operation_bind_layout_entries,
+                    };
+
                     let bind_layout = executor.get_bind_group_layout(&bind_layout_descriptor);
                     let bind_group_desriptor = wgpu::BindGroupDescriptor {
                         label: None,
@@ -195,32 +207,37 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                         entries: &operation_bind_entries,
                     };
                     let bind_group = executor.get_bind_group(&bind_group_desriptor);
-                    
+
                     let pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
                         label: None,
                         bind_group_layouts: &[&bind_layout],
                         push_constant_ranges: &[],
                     };
-            
+
                     let pipeline_layout = executor.get_pipeline_layout(&pipeline_layout_descriptor);
-                    
+
                     let shader_module = executor.get_shader_module(shader);
 
                     let pipeline_descriptor = wgpu::ComputePipelineDescriptor {
-                        label:None,
+                        label: None,
                         layout: Some(&pipeline_layout),
                         module: &shader_module,
                         entry_point,
                     };
-                    let pipeline: wgpu::ComputePipeline = executor.get_pipeline(&pipeline_descriptor);
+                    let pipeline: wgpu::ComputePipeline =
+                        executor.get_pipeline(&pipeline_descriptor);
 
-                    let command_buffer = [executor.dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, None).finish()];
+                    let command_buffer = [executor
+                        .dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, None)
+                        .finish()];
 
                     executor.execute(command_buffer.into_iter());
-                },
+                    continue;
+                }
             }
         }
-        todo!()
+        self.operations = Vec::new();
+        return Ok(executor);
     }
 }
 
@@ -255,6 +272,10 @@ where
             variables,
         }
     }
+
+    fn get_variables<'a>(&'a self) -> &Vec<VariableBind<'a,V>>{
+        &self.variables
+    }
 }
 
 impl<'a, V> Clone for VariableBind<'a, V>
@@ -265,7 +286,7 @@ where
         Self {
             variable: self.variable.clone(),
             bind_group: self.bind_group.clone(),
-            buffer_descriptor: self.buffer_descriptor.clone(),            
+            buffer_descriptor: self.buffer_descriptor.clone(),
             mutable: self.mutable.clone(),
         }
     }
@@ -285,7 +306,11 @@ where
     /// # Arguments
     /// * - `variable` - a reference to the variable to bind
     /// * - `bind_group` - the bind group number the variabe will be associated with
-    pub fn new(variable: &'a V, bind_group: u32,label:Option<&'a str>) -> VariableBind<'a, V, Mutable> {
+    pub fn new(
+        variable: &'a V,
+        bind_group: u32,
+        label: Option<&'a str>,
+    ) -> VariableBind<'a, V, Mutable> {
         let buffer_descriptor = variable.to_buffer_descriptor(label);
         VariableBind {
             variable,
@@ -296,19 +321,19 @@ where
     }
 
     /// Creates a [`wgpu::BindGroupLayoutEntry`] from [`self`]
-    /// 
+    ///
     /// USeful to build the bind group layout for the executor to execute.
-    pub fn get_bind_group_layout_entry(&self)-> wgpu::BindGroupLayoutEntry {
+    pub fn get_bind_group_layout_entry(&self) -> wgpu::BindGroupLayoutEntry {
         wgpu::BindGroupLayoutEntry {
-                    binding: self.bind_group, 
-                    visibility: wgpu::ShaderStages::COMPUTE, 
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false }, 
-                        min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
-                        has_dynamic_offset: false,
-                    },
-                    count: None,
-                }
+            binding: self.bind_group,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
+                has_dynamic_offset: false,
+            },
+            count: None,
+        }
     }
 
     /// This method returns weather the variable is mutable or not.
@@ -369,17 +394,17 @@ where
         }
     }
 
-    pub fn get_bind_group_layout_entry(&self)-> wgpu::BindGroupLayoutEntry {
+    pub fn get_bind_group_layout_entry(&self) -> wgpu::BindGroupLayoutEntry {
         wgpu::BindGroupLayoutEntry {
-                    binding: self.bind_group, 
-                    visibility: wgpu::ShaderStages::COMPUTE, 
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true }, 
-                        min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
-                        has_dynamic_offset: false,
-                    },
-                    count: None,
-                }
+            binding: self.bind_group,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
+                has_dynamic_offset: false,
+            },
+            count: None,
+        }
     }
 }
 
@@ -410,17 +435,17 @@ impl<'a> Module<'a> {
 }
 
 impl Operation {
-    fn add_bind(& mut self, index: usize)-> Result<(),anyhow::Error> {
+    fn add_bind(&mut self, index: usize) -> Result<(), anyhow::Error> {
         match self {
             Operation::Bind { bind_index } => {
                 bind_index.push(index);
                 Ok(())
             }
-            _=> Err(anyhow::anyhow!("Can't add a bind to any operation which is not an [`Operation::Bind`]"))
-            
+            _ => Err(anyhow::anyhow!(
+                "Can't add a bind to any operation which is not an [`Operation::Bind`]"
+            )),
         }
     }
-    
 }
 
 pub trait Variable
@@ -497,5 +522,9 @@ where
             }
         }
         Ok(workgroup)
+    }
+
+    fn get_data() {
+        todo!()
     }
 }
