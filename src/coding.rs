@@ -15,7 +15,7 @@ impl Shader {
     ///
     /// #Example
     /// ```
-    /// use wgpu_matrix::interface::Shader;
+    /// use wgpu_calc::coding::Shader;
     ///  let shader = Shader::from_content("
     ///     struct Mat2 {
     ///         elements: array<array<f32,3>,3>,
@@ -51,7 +51,7 @@ impl Shader {
     /// # Example
     ///
     /// ```
-    /// use wgpu_matrix::interface::Shader;
+    /// use wgpu_calc::coding::Shader;
     /// let shader = Shader::from_file_path("../shaders/example_shader.wgsl");
     /// ```
 
@@ -72,7 +72,7 @@ impl Shader {
     ///
     /// # Examples
     /// ```
-    /// use wgpu_matrix::interface::Shader;
+    /// use wgpu_calc::coding::Shader;
     /// let mut shader = Shader::from_content("
     ///     struct Mat2 {
     ///         elements: array<array<f32,€rows>,€cols>,

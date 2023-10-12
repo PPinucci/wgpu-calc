@@ -3,22 +3,48 @@
 //! Its job is to translate an easier to write code into code which will get to the
 //! GPU doing the job itself.
 //!
+//! All the structs in this libs are defined to operate with objects implementing
+//! the [`Variable`] trait.
+//!
+//! # Principal components:
+//! - [`Function`] is a struct which holds the definition of a function. It's a [`Shader`]
+//!     with an ['entry point'] which performs operations on some [`Variable`]
+//! - [`VariableBind`] is the link between a [`Variable`] and a 'bind group` defined in the shader`
+//!     Each [`Variable`] can potentially have more than one bind in the [`Shader`] and the definition
+//!     is held in this struct
+//! - [`Algorithm`] is the operational part of this library, it collects instances of [`Function`]
+//!     and tries to translate them as efficiently as possible to a series of [`Operation`]
+//!     Once every function is inserted in the Algorithm, the [`Algorithm::finish`] method is used
+//!     to actually send everything to the GPU and do the calculations
+//!
+//!
 #![allow(dead_code)]
 use anyhow::Ok;
-use wgpu::BufferDescriptor;
-
-use crate::errors::VariableError;
-use crate::interface::Executor;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 
 use crate::coding::Shader;
+use crate::interface::Executor;
+use crate::variable::Variable;
 
-#[derive(Clone)]
+/// This struct is the container for the different operations to perform
+///
+/// It helds all the necessary components to bind each [`Variable`],
+/// write the necessary buffers and execute the pipelines on the GPU.
+///
+/// The functions added to the [`Algorithm`] will be performed in series preserving
+/// the desired output.
+/// Some optimisation will be done in the future prior to executing the operations.
+/// # Example
+/// ```
+/// use wgpu_calc::algorithm::{Algorithm,Function, VariableBind};
+///
+/// ```
+#[derive(Debug)]
 pub struct Algorithm<'a, V: Variable> {
-    variables: Vec<&'a VariableBind<'a, V>>,
+    variables: Vec<StoredVariable<'a, V>>,
     modules: Vec<Module<'a>>,
-    operations: Vec<Operation>,
+    operations: Vec<Operation<'a>>,
     label: Option<&'a str>,
 }
 
@@ -43,26 +69,39 @@ where
 {
     variable: &'a V,
     bind_group: u32,
-    buffer_descriptor: wgpu::BufferDescriptor<'a>,
     mutable: std::marker::PhantomData<Type>,
 }
-#[derive(Debug, PartialEq,Clone)]
+
+#[derive(Debug)]
+struct StoredVariable<'a, V, Type = Mutable>
+where
+    V: Variable,
+{
+    variable: &'a V,
+    buffer_descriptor: wgpu::BufferDescriptor<'a>,
+    buffer: Option<wgpu::Buffer>,
+    mutable: std::marker::PhantomData<Type>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub(super) struct Module<'a> {
     shader: &'a Shader,
     entry_point: Vec<&'a str>,
 }
 
-#[derive(Debug,Clone)]
-enum Operation {
+#[derive(Debug, Clone)]
+enum Operation<'a> {
     BufferWrite {
         variable_index: usize,
     },
     Bind {
         bind_index: Vec<usize>,
+        bind_groups: Vec<u32>,
     },
     Execute {
         module_index: usize,
         entry_point_index: usize,
+        label: &'a str,
     },
 }
 
@@ -84,33 +123,31 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// This function takes the [`Function`] and translate it into [`Operation`], at the same time optimizing
     /// the calculation pipeline
     ///
-    /// # Panics
-    /// - if the previous function only resulted in a [`Operation::Bind`] since this should
-    ///     always followed by a [`Operation::Execute`]
-    pub fn add_function(&mut self, function: &'a Function<'a,V>)
+    pub fn add_function(&mut self, function: &'a Function<'a, V>)
     where
         V: Variable,
     {
-        let f_var = function.get_variables();
+        let f_label = stringify!(function);
+        let f_var = &function.variables;
         let mut binds = Operation::Bind {
             bind_index: Vec::new(),
+            bind_groups: Vec::new(),
         };
         for var in f_var {
-            if let Some(_) = self
+            if let Some(pos) = self
                 .variables
                 .iter()
-                .position(|&existing_var| existing_var == var)
+                .position(|existing_var| existing_var.get_var() == var.get_variable())
             {
-                self.variables.push(var);
-                let index = self.variables.len() - 1;
-                binds.add_bind(index).unwrap();
+                binds.add_bind(pos, var.get_bind()).unwrap();
             } else {
-                self.variables.push(var);
+                let sto_var = StoredVariable::new(var.get_variable());
+                self.variables.push(sto_var);
                 let index = self.variables.len() - 1;
                 self.operations.push(Operation::BufferWrite {
                     variable_index: index,
                 });
-                binds.add_bind(index).unwrap();
+                binds.add_bind(index, var.get_bind()).unwrap();
             }
         }
 
@@ -125,12 +162,14 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 self.operations.push(Operation::Execute {
                     module_index: pos,
                     entry_point_index: index,
+                    label: f_label,
                 })
             } else {
                 self.modules[pos].add_entry_point(function.entry_point);
                 self.operations.push(Operation::Execute {
                     module_index: pos,
                     entry_point_index: &self.modules[pos].entry_point.len() - 1,
+                    label: f_label,
                 })
             }
         } else {
@@ -146,7 +185,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     }
     /// Consumes the [`Algorithm`] and gives back a [`Solver`]
     ///
-    /// This is the moement where the machine is asked for a GPU device and the [`Operations`] are
+    /// This is the moment where the machine is asked for a GPU device and the [`Operations`] are
     /// put in a pipeline after having been optimized
     pub async fn finish(&mut self) -> Result<Executor<'a>, anyhow::Error> {
         let mut executor = Executor::new(self.label).await?;
@@ -154,12 +193,11 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         // self.optimize();
 
         let mut buffers = Vec::new();
-        let mut bind_layout_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
         let mut workgroups = [0 as u32; 3];
 
         for variable in &self.variables {
             buffers.push(executor.get_buffer(&variable.buffer_descriptor));
-            bind_layout_entries.push(variable.get_bind_group_layout_entry())
+            // bind_layout_entries.push(variable.get_bind_group_layout_entry())
         }
 
         let mut operation_bind_layout_entries = Vec::new();
@@ -167,14 +205,19 @@ impl<'a, V: Variable> Algorithm<'a, V> {
 
         for operation in &self.operations {
             match operation {
-                Operation::Bind { bind_index } => {
+                Operation::Bind {
+                    bind_index,
+                    bind_groups,
+                } => {
                     operation_bind_layout_entries = Vec::new();
                     operation_bind_entries = Vec::new();
-                    for index in bind_index {
+                    for (index, group) in bind_index.iter().zip(bind_groups) {
                         // let layout_add = &mut operation_bind_layout_entries;
-                        operation_bind_layout_entries.push(bind_layout_entries[*index]);
+                        operation_bind_layout_entries
+                            .push(self.variables[*index].get_bind_group_layout_entry(*group));
+                        // operation_bind_layout_entries.push(bind_layout_entries[*index]);
                         operation_bind_entries.push(wgpu::BindGroupEntry {
-                            binding: self.variables[*index].bind_group,
+                            binding: *group,
                             resource: buffers[*index].as_entire_binding(),
                         });
                         workgroups = self.variables[*index].variable.get_workgroup()?;
@@ -183,7 +226,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 }
                 Operation::BufferWrite { variable_index } => {
                     let variable = &self.variables[*variable_index].variable;
-                    let buffer_descriptor = variable.to_buffer_descriptor(None);
+                    let buffer_descriptor = variable.to_buffer_descriptor();
                     let buffer = executor.get_buffer(&buffer_descriptor);
                     executor.write_buffer(&buffer, variable.byte_data());
                     continue;
@@ -191,25 +234,26 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 Operation::Execute {
                     module_index,
                     entry_point_index,
+                    label,
                 } => {
                     let shader = self.modules[*module_index].shader;
                     let entry_point = self.modules[*module_index].entry_point[*entry_point_index];
 
                     let bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
-                        label: None,
+                        label: Some(label),
                         entries: &operation_bind_layout_entries,
                     };
 
                     let bind_layout = executor.get_bind_group_layout(&bind_layout_descriptor);
                     let bind_group_desriptor = wgpu::BindGroupDescriptor {
-                        label: None,
+                        label: Some(label),
                         layout: &bind_layout,
                         entries: &operation_bind_entries,
                     };
                     let bind_group = executor.get_bind_group(&bind_group_desriptor);
 
                     let pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
-                        label: None,
+                        label: Some(label),
                         bind_group_layouts: &[&bind_layout],
                         push_constant_ranges: &[],
                     };
@@ -219,7 +263,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     let shader_module = executor.get_shader_module(shader);
 
                     let pipeline_descriptor = wgpu::ComputePipelineDescriptor {
-                        label: None,
+                        label: Some(label),
                         layout: Some(&pipeline_layout),
                         module: &shader_module,
                         entry_point,
@@ -273,8 +317,12 @@ where
         }
     }
 
-    fn get_variables<'a>(&'a self) -> &Vec<VariableBind<'a,V>>{
-        &self.variables
+    fn get_variables<'a>(&'a self) -> Vec<&V> {
+        let mut vars = Vec::new();
+        for variable in &self.variables {
+            vars.push(variable.variable)
+        }
+        return vars;
     }
 }
 
@@ -286,7 +334,6 @@ where
         Self {
             variable: self.variable.clone(),
             bind_group: self.bind_group.clone(),
-            buffer_descriptor: self.buffer_descriptor.clone(),
             mutable: self.mutable.clone(),
         }
     }
@@ -306,33 +353,11 @@ where
     /// # Arguments
     /// * - `variable` - a reference to the variable to bind
     /// * - `bind_group` - the bind group number the variabe will be associated with
-    pub fn new(
-        variable: &'a V,
-        bind_group: u32,
-        label: Option<&'a str>,
-    ) -> VariableBind<'a, V, Mutable> {
-        let buffer_descriptor = variable.to_buffer_descriptor(label);
+    pub fn new(variable: &'a V, bind_group: u32) -> VariableBind<'a, V, Mutable> {
         VariableBind {
             variable,
             bind_group,
-            buffer_descriptor,
             mutable: Default::default(),
-        }
-    }
-
-    /// Creates a [`wgpu::BindGroupLayoutEntry`] from [`self`]
-    ///
-    /// USeful to build the bind group layout for the executor to execute.
-    pub fn get_bind_group_layout_entry(&self) -> wgpu::BindGroupLayoutEntry {
-        wgpu::BindGroupLayoutEntry {
-            binding: self.bind_group,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
-                has_dynamic_offset: false,
-            },
-            count: None,
         }
     }
 
@@ -354,7 +379,6 @@ where
         VariableBind {
             variable: self.variable,
             bind_group: self.bind_group,
-            buffer_descriptor: self.buffer_descriptor,
             mutable: std::marker::PhantomData::<Immutable>,
         }
     }
@@ -389,21 +413,7 @@ where
         VariableBind {
             variable: self.variable,
             bind_group: self.bind_group,
-            buffer_descriptor: self.buffer_descriptor,
             mutable: std::marker::PhantomData::<Mutable>,
-        }
-    }
-
-    pub fn get_bind_group_layout_entry(&self) -> wgpu::BindGroupLayoutEntry {
-        wgpu::BindGroupLayoutEntry {
-            binding: self.bind_group,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
-                has_dynamic_offset: false,
-            },
-            count: None,
         }
     }
 }
@@ -413,6 +423,45 @@ impl<V: Variable> PartialEq for VariableBind<'_, V> {
         self.variable == other.variable
             && self.bind_group == other.bind_group
             && self.mutable == other.mutable
+    }
+}
+
+impl<V: Variable> StoredVariable<'_, V> {
+    fn get_var(&self) -> &V {
+        self.variable
+    }
+
+    fn get_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.buffer.as_ref()
+    }
+
+    /// Creates a [`wgpu::BindGroupLayoutEntry`] from [`self`]
+    ///
+    /// USeful to build the bind group layout for the executor to execute.
+    pub fn get_bind_group_layout_entry(&self, bind: u32) -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding: bind,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
+                has_dynamic_offset: false,
+            },
+            count: None,
+        }
+    }
+}
+
+impl<'a, V: Variable> StoredVariable<'a, V, Mutable> {
+    fn new(var: &'a V) -> StoredVariable<'a, V> {
+        let buffer_descriptor = var.to_buffer_descriptor();
+
+        Self {
+            variable: var,
+            buffer_descriptor,
+            buffer: None,
+            mutable: std::marker::PhantomData::<Mutable>,
+        }
     }
 }
 
@@ -434,97 +483,20 @@ impl<'a> Module<'a> {
     }
 }
 
-impl Operation {
-    fn add_bind(&mut self, index: usize) -> Result<(), anyhow::Error> {
+impl Operation<'_> {
+    fn add_bind(&mut self, index: usize, bind_group: u32) -> Result<(), anyhow::Error> {
         match self {
-            Operation::Bind { bind_index } => {
+            Operation::Bind {
+                bind_index,
+                bind_groups,
+            } => {
                 bind_index.push(index);
+                bind_groups.push(bind_group);
                 Ok(())
             }
             _ => Err(anyhow::anyhow!(
                 "Can't add a bind to any operation which is not an [`Operation::Bind`]"
             )),
         }
-    }
-}
-
-pub trait Variable
-where
-    Self: PartialEq + Debug,
-{
-    /// This gets a buffer descriptor from the [`Variable`] itself
-    ///
-    /// It is useful to create the buffer, the bind group layouts and the ipelines which will be executed
-    /// on the GPU
-    fn to_buffer_descriptor<'a>(&'a self, label: Option<&'a str>) -> BufferDescriptor {
-        return BufferDescriptor {
-            label,
-            mapped_at_creation: false,
-            size: self.byte_size(),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-        };
-    }
-
-    fn get_name(&self) -> Option<&str>;
-
-    /// This function calculates the byte size of the object
-    ///
-    /// The size needs to be valid and true, as it will be used to calculate the dimension
-    /// of the buffer, other than the workgroup needed to be used.
-    /// To implement the function consider using [`std::mem::size_of`], while transforming the
-    /// the object in simple ones.
-    /// Plase read the WGLS sizing standards to better format your object before getting down the
-    /// path of executing calculations.
-    ///
-    fn byte_size(&self) -> u64;
-
-    /// This method is needed to pass the data to the GPU
-    ///
-    /// The GPU needs the data as an ordered stream of bit, which is stored in
-    /// the buffer and than distributed to the thread.
-    /// Condier using [`bytemuk`] to perform this operation.
-    fn byte_data(&self) -> &[u8];
-
-    /// This method is needed to better distribute the workload for the [`Variable`] calculation
-    ///
-    /// It returns the size in number of byte for each dimension of the [`Variable`], with its
-    /// primary intent being the usage with matrices of maximum 3 dimensions ( see [`Variable::chek_dimensions`])
-    /// Each dimension will be associated with a workgroup id in the GPU allowing the parallel execution of the calculus
-    fn dimension_sizes(&self) -> [u32; 3];
-
-    /// This method defines the workgroup count for the object
-    ///
-    /// It takes the dimension of the object and
-    fn get_workgroup(&self) -> Result<[u32; 3], anyhow::Error>
-    where
-        Self: Debug,
-    {
-        let dimensions = self.dimension_sizes();
-
-        let mut workgroup = [1u32; 3];
-        for id in 0..dimensions.len() {
-            match (dimensions[id], id) {
-                (0..=65535, _) => workgroup[id] = dimensions[id],
-                (65536..=4194240, _) => {
-                    // error to convey workgoup number for i, convey also the dimension which gave the error
-                    return Err(VariableError::<u32>::WorkgroupDimensionError(id as u32).into());
-                }
-                (4194241..=16776960, 1 | 2) => {
-                    // same as above
-                    return Err(VariableError::<u32>::WorkgroupDimensionError(id as u32).into());
-                }
-                _ => {
-                    // fatal error not possible to instantiate element, too big
-                    panic!("Variable dimension is too big, please decrease size in order to fit to the allowed calculation dimension")
-                }
-            }
-        }
-        Ok(workgroup)
-    }
-
-    fn get_data() {
-        todo!()
     }
 }

@@ -24,7 +24,4 @@ pub mod algorithm;
 pub mod coding;
 pub mod errors;
 pub mod interface;
-pub mod solver;
-
-#[cfg(test)]
-mod tests;
+pub mod variable;

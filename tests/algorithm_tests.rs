@@ -1,7 +1,9 @@
-use crate::algorithm::{Algorithm, Function, Variable, VariableBind};
-use crate::coding::Shader;
+extern crate wgpu_calc;
 use bytemuck;
 use ndarray::{array, Array2};
+use wgpu_calc::algorithm::{Algorithm, Function, VariableBind};
+use wgpu_calc::coding::Shader;
+use wgpu_calc::variable::Variable;
 
 #[derive(Debug, PartialEq)]
 struct GpuArray2<'a> {
@@ -54,24 +56,19 @@ async fn add_test() {
     let var = GpuArray2::new(&array, "test array");
     let (nrows, ncols) = var.get_dims();
 
-    let mut shader = Shader::from_file_path("./src/tests/shaders/mat2calcs.pwgsl").unwrap();
+    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
     shader.replace("€cols", ncols.to_string().as_str());
     shader.replace("€nrow", nrows.to_string().as_str());
 
-    let bindings = [
-        VariableBind::new(&var, 0, Some("test_variable 1")),
-        VariableBind::new(&var, 1, Some("test_variable 2")),
-    ];
+    let bindings = [VariableBind::new(&var, 0), VariableBind::new(&var, 1)];
 
     let function = Function::new(&shader, "add", &bindings);
 
     let mut algorithm = Algorithm::new(Some("Test algorithm"));
-    
-    algorithm.add_function(&function);    
+
+    algorithm.add_function(&function);
 
     let executor = algorithm.finish().await.unwrap();
 
-
-    // algorithm.run()
+    // let result = var.get_data(algorithm);
 }
-

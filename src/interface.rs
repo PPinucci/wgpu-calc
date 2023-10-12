@@ -25,7 +25,7 @@ impl Executor<'_> {
     /// will create an instance of [`GpuInterface`] with empty buffers.
     /// To use it simply write
     /// ```
-    /// use wgpu_matrix::interface::Executor;
+    /// use wgpu_calc::interface::Executor;
     /// use pollster;
     ///
     /// let interface = pollster::block_on(Executor::new(Some("Label for debugging purposes"))).unwrap();
@@ -90,7 +90,7 @@ impl Executor<'_> {
     ///
     /// # Example
     /// ```
-    /// use wgpu_matrix::interface::Executor;
+    /// use wgpu_calc::interface::Executor;
     /// use pollster;
     ///   let executor = pollster::block_on(Executor::new(Some("Debug Label"))).unwrap();
     ///   let input_bind_group_layout_descriptor = &wgpu::BindGroupLayoutDescriptor {
@@ -268,7 +268,7 @@ mod interface_test {
 
         let workgroups: [u32; 3] = [10000, 1, 1];
 
-        let shader = Shader::from_file_path("./src/tests/shaders/example_shader.wgsl").unwrap();
+        let shader = Shader::from_file_path("./tests/shaders/example_shader.wgsl").unwrap();
         let shader_module = executor.get_shader_module(&shader);
         let entry_point = "add";
 
