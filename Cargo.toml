@@ -15,6 +15,7 @@ futures-intrusive = "^0.5.0"
 thiserror = "^1.0.48"
 anyhow ="^1.0.74"
 tokio = {version = "1.33.0", features = ["full"]}
+futures-channel = "0.3.28"
 
 ## This is to build for wasm: browser integration. Not much will be done apart this
 [target.'cfg(target_arch = "wasm32")'.dependencies]

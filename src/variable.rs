@@ -49,7 +49,7 @@ where
     /// the Variable
     /// The data is returned in the same way as it's written, so the same logic which is
     /// implemented on {`Variable::byte_data`} should be implemented here
-    fn read_vec(&mut self, vec: Vec<f32>);
+    fn read_data(&mut self, slice: &[u8]);
 
     /// This method is needed to better distribute the workload for the [`Variable`] calculation
     ///

@@ -1,6 +1,4 @@
 extern crate wgpu_calc;
-
-use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use bytemuck;
@@ -52,9 +50,11 @@ impl Variable for GpuArray2<'_> {
         Some(self.name)
     }
 
-    fn read_vec(&mut self, vec: Vec<f32>) {
-        self.data = vec;
+    fn read_data(&mut self, slice: &[u8]) {
+        todo!()
     }
+
+    
 }
 
 #[tokio::test]
@@ -78,10 +78,15 @@ async fn add_1_test() {
 
     algorithm.add_function(function);
 
+    // print!("{:?}", algorithm.get_operations())
+
     algorithm.finish().await.unwrap();
 
+
+    let output = Arc::clone(&var);
+
     algorithm
-        .get_output_unmap(&var.lock().unwrap())
+        .get_output_unmap(&output)
         .await
         .unwrap();
 

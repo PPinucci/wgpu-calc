@@ -4,8 +4,7 @@
 //! using the [`wgpu`] crate and its functions.
 
 #![allow(dead_code)]
-use std::rc::Rc;
-
+// use futures-channel;
 use crate::coding::Shader;
 use wgpu::util::DeviceExt;
 
@@ -256,10 +255,7 @@ impl Executor<'_> {
         self.queue.submit(command_buffers)
     }
 
-    pub async fn read_buffer(&self, buffer: &wgpu::Buffer) -> Vec<f32> {
-        let buffer_size = buffer.size();
-        let mut output = Vec::new();
-        output.reserve_exact(buffer_size as usize);
+    pub async fn read_buffer(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
         let mut command_encoder =
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -277,34 +273,30 @@ impl Executor<'_> {
 
         self.queue.submit(std::iter::once(command_encoder.finish()));
 
-        // map the staging buffer and read its contents we do this inside a scope in order to release the lock on the mapped range.
-
-        let buffer_slice = staging_buffer.slice(..);
-        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            // move moves tx
-            tx.send(result).unwrap();
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        staging_buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |result| {
+            let _ = sender.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
-
-        rx.receive().await.unwrap().unwrap();
-        let data = buffer_slice.get_mapped_range();
-        let result: &[f32] = bytemuck::cast_slice(&data); // notice here the length of the array is determined at runtime
-        staging_buffer.unmap();
-        output = result.to_owned();
-
-        return output;
+        self.device.poll(wgpu::Maintain::Wait); // TODO: poll in the background instead of blocking
+        receiver
+        .await
+        .expect("communication failed")
+        .expect("buffer reading failed");
+        let slice: &[u8] = &staging_buffer.slice(..).get_mapped_range();
+        return slice.to_owned()
     }
 }
 
 #[cfg(test)]
 mod interface_test {
     use super::*;
-    #[test]
-    fn base_calc() {
+    #[tokio::test]
+    async fn base_calc() {
         let label = Some("Test executor");
 
-        let mut executor = pollster::block_on(Executor::new(label)).unwrap();
+        let mut executor = Executor::new(label).await.unwrap();
 
         let array: [f32; 10000] = [1.0; 10000];
 
@@ -342,24 +334,28 @@ mod interface_test {
 
         let input_bind_layout = executor.get_bind_group_layout(&input_bind_group_layout_descriptor);
 
-        let array1_buffer_descriptor = wgpu::util::BufferInitDescriptor {
+        let array1_buffer_descriptor = wgpu::BufferDescriptor {
+            label,
+            usage: 
+                wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+                // | wgpu::BufferUsages::MAP_READ,
+            size: (std::mem::size_of::<f32>()*array.len()) as u64,
+            mapped_at_creation: false,
+        };
+
+        let array2_buffer_descriptor = wgpu::BufferDescriptor {
             label,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC, // uniform is better in performance than Storaage, but has less storage space
-            contents: bytemuck::cast_slice(&array),
-        };
+            size: (std::mem::size_of::<f32>()*array.len()) as u64,
+            mapped_at_creation: false, // uniform is better in performance than Storaage, but has less storage space
+                    };
 
-        let array2_buffer_descriptor = wgpu::util::BufferInitDescriptor {
-            label,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC, // uniform is better in performance than Storaage, but has less storage space
-            contents: bytemuck::cast_slice(&array),
-        };
-
-        let array1_buffer = executor.get_buffer_init(&array1_buffer_descriptor);
-        let array2_buffer = executor.get_buffer_init(&array2_buffer_descriptor);
+        let array1_buffer = executor.get_buffer(&array1_buffer_descriptor);
+        let array2_buffer = executor.get_buffer(&array2_buffer_descriptor);
 
         let bind_group_descriptor = wgpu::BindGroupDescriptor {
             label,
@@ -395,10 +391,18 @@ mod interface_test {
 
         let pipeline: wgpu::ComputePipeline = executor.get_pipeline(&pipeline_descriptor);
 
+        executor.write_buffer(&array1_buffer, bytemuck::cast_slice(&array));
+        executor.write_buffer(&array2_buffer, bytemuck::cast_slice(&array));
+
         let command_encoder =
             executor.dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, label);
         let command_buffer = [command_encoder.finish()];
 
         executor.execute(command_buffer.into_iter());
+
+        let output = executor.read_buffer(&array1_buffer).await;
+
+
+        assert_eq!(bytemuck::cast_slice::<u8,f32>(&output),&[2.0;10000])
     }
 }
