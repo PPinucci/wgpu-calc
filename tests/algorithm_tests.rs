@@ -1,4 +1,5 @@
 extern crate wgpu_calc;
+use std::ops::Add;
 use std::sync::{Arc, Mutex};
 
 use bytemuck;
@@ -30,6 +31,10 @@ impl<'a> GpuArray2<'a> {
     fn get_dims(&self) -> (usize, usize) {
         (self.n_rows as usize, self.n_cols as usize)
     }
+
+    fn to_array(&self)->Array2<f32> {
+        return Array2::from_shape_vec((self.n_cols as usize,self.n_rows as usize), self.data.clone()).unwrap();
+    }
 }
 
 impl Variable for GpuArray2<'_> {
@@ -51,7 +56,8 @@ impl Variable for GpuArray2<'_> {
     }
 
     fn read_data(&mut self, slice: &[u8]) {
-        todo!()
+        let vec: Vec<f32> = bytemuck::cast_slice(slice).to_owned();
+        self.data = vec;
     }
 
     
@@ -66,9 +72,9 @@ async fn add_1_test() {
     let var = Arc::new(Mutex::new(GpuArray2::new(array, "test array")));
     let (nrows, ncols) = var.lock().unwrap().get_dims();
 
-    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
-    shader.replace("€cols", ncols.to_string().as_str());
-    shader.replace("€nrow", nrows.to_string().as_str());
+    let shader = Shader::from_file_path("./tests/shaders/mat2calcs.wgsl").unwrap();
+    // shader.replace("€cols", ncols.to_string().as_str());
+    // shader.replace("€nrow", nrows.to_string().as_str());
 
     let bind1 = Arc::clone(&var);
 
@@ -90,5 +96,9 @@ async fn add_1_test() {
         .await
         .unwrap();
 
-    print!("{:?}", var.lock().unwrap())
+    let var_lock = var.lock().unwrap();
+    let result = var_lock.to_array();
+    print!("{:?}", result);
+    let check = array![[1., 1., 1.], [2., 2., 2.], [3., 3., 3.]];
+    assert_eq!(result, check)
 }

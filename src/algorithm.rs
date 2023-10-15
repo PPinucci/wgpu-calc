@@ -145,9 +145,19 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             }) {
                 binds.add_bind(pos, var.bind_group).unwrap();
             } else {
-                let sto_var = StoredVariable::new(Arc::clone(&var.variable));
+                let var_ref= Arc::clone(&var.variable);
+                let lock = var_ref.lock().unwrap();
+                let buffer_descriptor = lock.to_buffer_descriptor();
+                let buffer = self.executor.get_buffer(&buffer_descriptor);
+                
+                let sto_var = StoredVariable{
+                    variable:Arc::clone(&var.variable),
+                    buffer: Some(buffer), 
+                    mutable: std::marker::PhantomData::<Mutable> };
+                
                 self.variables.push(sto_var);
                 let index = self.variables.len() - 1;
+
                 self.operations.push(Operation::BufferWrite {
                     variable_index: index,
                 });
@@ -238,13 +248,14 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     }
                 }
                 Operation::BufferWrite { variable_index } => {
-                    let mut sto_var = &self.variables[*variable_index];
+                    let buffer = self.variables[*variable_index].buffer.as_ref().unwrap();
+                    let sto_var = &self.variables[*variable_index];
                     let data_lock = sto_var.variable.lock().unwrap();
-                    let buffer = self.executor.get_buffer(&data_lock.to_buffer_descriptor());
+                    // let buffer = self.executor.get_buffer(&data_lock.to_buffer_descriptor());
                     
-                    // let buffer = &buffers[*variable_index];
+                    // // let buffer = &buffers[*variable_index];
                     self.executor.write_buffer(&buffer, data_lock.byte_data());
-                    self.variables[*variable_index].buffer = Some(buffer);
+                    // self.variables[*variable_index].buffer = Some(buffer);
                                 }
                 Operation::Execute {
                     module_index,
