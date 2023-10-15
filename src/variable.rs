@@ -11,7 +11,7 @@ where
     ///
     /// It is useful to create the buffer, the bind group layouts and the ipelines which will be executed
     /// on the GPU
-    fn to_buffer_descriptor<'a>(&'a self) -> BufferDescriptor {
+    fn to_buffer_descriptor(&self) -> BufferDescriptor {
         let label = self.get_name();
         return BufferDescriptor {
             label,
@@ -42,6 +42,14 @@ where
     /// the buffer and than distributed to the thread.
     /// Condier using [`bytemuk`] to perform this operation.
     fn byte_data(&self) -> &[u8];
+
+    /// This is the opposite of [`Variable::byte_data`] to get the data back
+    ///
+    /// The stream of data comes from the GPU as a Vec of f32, which needs to be translated into
+    /// the Variable
+    /// The data is returned in the same way as it's written, so the same logic which is
+    /// implemented on {`Variable::byte_data`} should be implemented here
+    fn read_vec(&mut self, vec: Vec<f32>);
 
     /// This method is needed to better distribute the workload for the [`Variable`] calculation
     ///

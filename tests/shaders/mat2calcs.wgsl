@@ -20,5 +20,5 @@ fn result_to_b() {
 
 @compute @workgroup_size(1,1,1)
 fn add (@builtin(global_invocation_id) id: vec3<u32>) {
-        r.mtx[id.x][id.y] = a.mtx[id.x][id.y] + b.mtx[id.x][id.y];
+        a.mtx[id.x][id.y] = a.mtx[id.x][id.y] + 1.0;
 }

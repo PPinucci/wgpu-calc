@@ -4,6 +4,8 @@
 //! using the [`wgpu`] crate and its functions.
 
 #![allow(dead_code)]
+use std::rc::Rc;
+
 use crate::coding::Shader;
 use wgpu::util::DeviceExt;
 
@@ -12,7 +14,7 @@ use wgpu::util::DeviceExt;
 /// It's responsible of creating the comunication with the GPU, binding the data to the buffers,
 /// loading the shaders, filling the queue with the correct pipeline of commands and launching the calculations
 /// in the device.
-
+#[derive(Debug)]
 pub struct Executor<'a> {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -252,6 +254,46 @@ impl Executor<'_> {
         command_buffers: I,
     ) -> wgpu::SubmissionIndex {
         self.queue.submit(command_buffers)
+    }
+
+    pub async fn read_buffer(&self, buffer: &wgpu::Buffer) -> Vec<f32> {
+        let buffer_size = buffer.size();
+        let mut output = Vec::new();
+        output.reserve_exact(buffer_size as usize);
+        let mut command_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("copying command encoder"),
+                });
+
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+            size: buffer.size(),
+        });
+
+        command_encoder.copy_buffer_to_buffer(buffer, 0, &staging_buffer, 0, staging_buffer.size());
+
+        self.queue.submit(std::iter::once(command_encoder.finish()));
+
+        // map the staging buffer and read its contents we do this inside a scope in order to release the lock on the mapped range.
+
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            // move moves tx
+            tx.send(result).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+
+        rx.receive().await.unwrap().unwrap();
+        let data = buffer_slice.get_mapped_range();
+        let result: &[f32] = bytemuck::cast_slice(&data); // notice here the length of the array is determined at runtime
+        staging_buffer.unmap();
+        output = result.to_owned();
+
+        return output;
     }
 }
 

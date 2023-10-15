@@ -19,13 +19,15 @@
 //!
 //!
 #![allow(dead_code)]
-use anyhow::Ok;
+use anyhow::{anyhow, Ok};
 use std::fmt::Debug;
 use std::num::NonZeroU64;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex};
 
 use crate::coding::Shader;
 use crate::interface::Executor;
-use crate::variable::Variable;
+use crate::variable::{self, Variable};
 
 /// This struct is the container for the different operations to perform
 ///
@@ -42,43 +44,44 @@ use crate::variable::Variable;
 /// ```
 #[derive(Debug)]
 pub struct Algorithm<'a, V: Variable> {
-    variables: Vec<StoredVariable<'a, V>>,
+    variables: Vec<StoredVariable<V>>,
     modules: Vec<Module<'a>>,
     operations: Vec<Operation<'a>>,
     label: Option<&'a str>,
+    executor: Executor<'a>,
 }
 
 pub struct Function<'a, V: Variable> {
     shader: &'a Shader,
     entry_point: &'a str,
-    variables: Vec<VariableBind<'a, V>>,
+    variables: Vec<VariableBind<V>>,
 }
 #[derive(Debug)]
 pub struct Mutable;
 #[derive(Debug)]
 pub struct Immutable;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 /// This struct holds a pair of (variable, bind_no)
 ///
 /// It's useful for the Function to know which bind group to associate this
 /// variable to.
-pub struct VariableBind<'a, V, Type = Mutable>
+pub struct VariableBind<V, Type = Mutable>
 where
     V: Variable,
 {
-    variable: &'a V,
+    variable: Arc<Mutex<V>>,
     bind_group: u32,
     mutable: std::marker::PhantomData<Type>,
 }
 
 #[derive(Debug)]
-struct StoredVariable<'a, V, Type = Mutable>
+struct StoredVariable<V, Type = Mutable>
 where
     V: Variable,
 {
-    variable: &'a V,
-    buffer_descriptor: wgpu::BufferDescriptor<'a>,
+    variable: Arc<Mutex<V>>,
+    // buffer_descriptor: wgpu::BufferDescriptor<'a>,
     buffer: Option<wgpu::Buffer>,
     mutable: std::marker::PhantomData<Type>,
 }
@@ -109,13 +112,15 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// Creates a new empty [`Algorithm`]
     ///
     /// The [`Algorithm`] will not be instantiated with any [`Operation`], will just be empty
-    pub fn new(label: Option<&'a str>) -> Self {
-        Algorithm {
+    pub async fn new(label: Option<&'a str>) -> Result<Algorithm<'a, V>, anyhow::Error> {
+        let executor = Executor::new(label).await?;
+        Ok(Algorithm {
             operations: Vec::new(),
             variables: Vec::new(),
             modules: Vec::new(),
             label,
-        }
+            executor,
+        })
     }
 
     /// Adds a [`Function`] to the [`Algorithm`]
@@ -123,31 +128,30 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// This function takes the [`Function`] and translate it into [`Operation`], at the same time optimizing
     /// the calculation pipeline
     ///
-    pub fn add_function(&mut self, function: &'a Function<'a, V>)
+    pub fn add_function(&mut self, function: Function<'a, V>)
     where
         V: Variable,
     {
         let f_label = stringify!(function);
-        let f_var = &function.variables;
+        let f_var = function.variables;
         let mut binds = Operation::Bind {
             bind_index: Vec::new(),
             bind_groups: Vec::new(),
         };
         for var in f_var {
-            if let Some(pos) = self
-                .variables
-                .iter()
-                .position(|existing_var| existing_var.get_var() == var.get_variable())
-            {
-                binds.add_bind(pos, var.get_bind()).unwrap();
+            if let Some(pos) = self.variables.iter().position(|existing_var| {
+                existing_var.variable.lock().unwrap().deref()
+                    == var.variable.lock().unwrap().deref()
+            }) {
+                binds.add_bind(pos, var.bind_group).unwrap();
             } else {
-                let sto_var = StoredVariable::new(var.get_variable());
+                let sto_var = StoredVariable::new(Arc::clone(&var.variable));
                 self.variables.push(sto_var);
                 let index = self.variables.len() - 1;
                 self.operations.push(Operation::BufferWrite {
                     variable_index: index,
                 });
-                binds.add_bind(index, var.get_bind()).unwrap();
+                binds.add_bind(index, var.bind_group).unwrap();
             }
         }
 
@@ -187,17 +191,15 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     ///
     /// This is the moment where the machine is asked for a GPU device and the [`Operations`] are
     /// put in a pipeline after having been optimized
-    pub async fn finish(&mut self) -> Result<Executor<'a>, anyhow::Error> {
-        let mut executor = Executor::new(self.label).await?;
-
+    pub async fn finish(&mut self) -> Result<(), anyhow::Error> {
         // self.optimize();
 
         let mut buffers = Vec::new();
         let mut workgroups = [0 as u32; 3];
 
         for variable in &self.variables {
-            buffers.push(executor.get_buffer(&variable.buffer_descriptor));
-            // bind_layout_entries.push(variable.get_bind_group_layout_entry())
+            let variable = variable.variable.lock().unwrap();
+            buffers.push(self.executor.get_buffer(&variable.to_buffer_descriptor()));
         }
 
         let mut operation_bind_layout_entries = Vec::new();
@@ -220,15 +222,19 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                             binding: *group,
                             resource: buffers[*index].as_entire_binding(),
                         });
-                        workgroups = self.variables[*index].variable.get_workgroup()?;
+                        workgroups = self.variables[*index]
+                            .variable
+                            .lock()
+                            .unwrap()
+                            .get_workgroup()?;
                     }
                     continue;
                 }
                 Operation::BufferWrite { variable_index } => {
-                    let variable = &self.variables[*variable_index].variable;
+                    let variable = self.variables[*variable_index].variable.lock().unwrap();
                     let buffer_descriptor = variable.to_buffer_descriptor();
-                    let buffer = executor.get_buffer(&buffer_descriptor);
-                    executor.write_buffer(&buffer, variable.byte_data());
+                    let buffer = self.executor.get_buffer(&buffer_descriptor);
+                    self.executor.write_buffer(&buffer, variable.byte_data());
                     continue;
                 }
                 Operation::Execute {
@@ -244,13 +250,13 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                         entries: &operation_bind_layout_entries,
                     };
 
-                    let bind_layout = executor.get_bind_group_layout(&bind_layout_descriptor);
+                    let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
                     let bind_group_desriptor = wgpu::BindGroupDescriptor {
                         label: Some(label),
                         layout: &bind_layout,
                         entries: &operation_bind_entries,
                     };
-                    let bind_group = executor.get_bind_group(&bind_group_desriptor);
+                    let bind_group = self.executor.get_bind_group(&bind_group_desriptor);
 
                     let pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
                         label: Some(label),
@@ -258,9 +264,11 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                         push_constant_ranges: &[],
                     };
 
-                    let pipeline_layout = executor.get_pipeline_layout(&pipeline_layout_descriptor);
+                    let pipeline_layout = self
+                        .executor
+                        .get_pipeline_layout(&pipeline_layout_descriptor);
 
-                    let shader_module = executor.get_shader_module(shader);
+                    let shader_module = self.executor.get_shader_module(shader);
 
                     let pipeline_descriptor = wgpu::ComputePipelineDescriptor {
                         label: Some(label),
@@ -269,19 +277,54 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                         entry_point,
                     };
                     let pipeline: wgpu::ComputePipeline =
-                        executor.get_pipeline(&pipeline_descriptor);
+                        self.executor.get_pipeline(&pipeline_descriptor);
 
-                    let command_buffer = [executor
+                    let command_buffer = [self
+                        .executor
                         .dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, None)
                         .finish()];
 
-                    executor.execute(command_buffer.into_iter());
+                    self.executor.execute(command_buffer.into_iter());
                     continue;
                 }
             }
         }
         self.operations = Vec::new();
-        return Ok(executor);
+        return Ok(());
+    }
+
+    /// This method overwrite the [`Variable`] *`var` with the ouptut of the calculation
+    ///
+    /// The function returns an error if the variable is not found in the [`Algorithm`] or
+    /// if the
+    pub async fn get_output_unmap(&mut self, var: &V) -> Result<(), anyhow::Error> {
+        let mut var_pos = 0;
+        if let Some(pos) = self
+            .variables
+            .iter()
+            .position(|existing_var| existing_var.variable.lock().unwrap().deref() == var)
+        {
+            if let Some(_) = &self.variables[pos].buffer {
+                var_pos = pos;
+            } else {
+                return Err(anyhow!(
+                    "No buffer present for variable {:?}",
+                    var.get_name()
+                ));
+            }
+        } else {
+            return Err(anyhow!(
+                "Variable {:?} not found in {:?} Algorithm",
+                var.get_name(),
+                self.label
+            ));
+        }
+
+        let buffer = self.variables[var_pos].buffer.as_ref().unwrap();
+        let output = self.executor.read_buffer(&buffer).await;
+
+        self.variables[var_pos].write_variable(output);
+        return Ok(());
     }
 }
 
@@ -304,12 +347,8 @@ where
     pub fn new<'a>(
         shader: &'a Shader,
         entry_point: &'a str,
-        vars: &'a [VariableBind<V>],
+        variables: Vec<VariableBind<V>>,
     ) -> Function<'a, V> {
-        let mut variables: Vec<VariableBind<'_, V>> = Vec::new();
-        for variable in vars {
-            variables.push(variable.clone())
-        }
         Function {
             shader,
             entry_point,
@@ -317,29 +356,29 @@ where
         }
     }
 
-    fn get_variables<'a>(&'a self) -> Vec<&V> {
-        let mut vars = Vec::new();
-        for variable in &self.variables {
-            vars.push(variable.variable)
-        }
-        return vars;
-    }
+    // fn get_variables<'a>(&'a self) -> Vec<&'a mut V> {
+    //     let mut vars = Vec::new();
+    //     for variable in &self.variables {
+    //         vars.push(variable.variable)
+    //     }
+    //     return vars;
+    // }
 }
 
-impl<'a, V> Clone for VariableBind<'a, V>
-where
-    V: Variable,
-{
-    fn clone(&self) -> Self {
-        Self {
-            variable: self.variable.clone(),
-            bind_group: self.bind_group.clone(),
-            mutable: self.mutable.clone(),
-        }
-    }
-}
+// impl<'a, V> Clone for VariableBind<'a, V>
+// where
+//     V: Variable,
+// {
+//     fn clone(&self) -> Self {
+//         Self {
+//             variable: self.variable.clone(),
+//             bind_group: self.bind_group.clone(),
+//             mutable: self.mutable.clone(),
+//         }
+//     }
+// }
 
-impl<'a, V> VariableBind<'a, V, Mutable>
+impl<'a, V> VariableBind<V, Mutable>
 where
     V: Variable,
 {
@@ -353,7 +392,8 @@ where
     /// # Arguments
     /// * - `variable` - a reference to the variable to bind
     /// * - `bind_group` - the bind group number the variabe will be associated with
-    pub fn new(variable: &'a V, bind_group: u32) -> VariableBind<'a, V, Mutable> {
+    pub fn new(variable: Arc<Mutex<V>>, bind_group: u32) -> VariableBind<V, Mutable> {
+        // let variable = Arc::clone(Mutex::new(*var));
         VariableBind {
             variable,
             bind_group,
@@ -375,41 +415,62 @@ where
     /// At the time of writing any variable can be set as read/write and set as immutable. This could potentially
     /// cause concurrency problems when queueing the pipelines on tha GPU.
     /// An immutable [`VariableBind`] is considered not to change during the calculation.
-    pub unsafe fn set_immutable(self) -> VariableBind<'a, V, Immutable> {
+    pub unsafe fn set_immutable(self) -> VariableBind<V, Immutable> {
         VariableBind {
             variable: self.variable,
             bind_group: self.bind_group,
             mutable: std::marker::PhantomData::<Immutable>,
         }
     }
+
+    // pub fn get_var_mut(self)-> &'a mut V {
+    //     self.variable.re
+    // }
 }
 
-impl<V, Type> VariableBind<'_, V, Type>
+impl<V, Type> VariableBind<V, Type>
 where
     V: Variable,
 {
-    /// gets the [`Variable`] from the [`VariableBind`]
+    // /// gets the [`Variable`] from the [`VariableBind`]
+    // ///
+    // /// This is useful to perform actions on the variables, in particular for the [`Algorithm`] to
+    // /// create the associated [`wgpu::BufferDescriptor`] and/or optimize the solution of the
+    // pub fn get_variable(&self) -> &V {
+    //     self.variable.lock().unwrap().deref()
+    // }
+
+    // /// Gets the bind group the [`Variable`] is set to
+    // pub fn get_bind(&self) -> u32 {
+    //     self.bind_group
+    // }
+}
+
+impl<'a, V> VariableBind<V, Immutable>
+where
+    V: Variable,
+{
+    /// Creates a new [`VariableBind`] from the variable and the binding group number
     ///
-    /// This is useful to perform actions on the variables, in particular for the [`Algorithm`] to
-    /// create the associated [`wgpu::BufferDescriptor`] and/or optimize the solution of the
-    pub fn get_variable(&self) -> &V {
-        self.variable
-    }
-
-    /// Gets the bind group the [`Variable`] is set to
-    pub fn get_bind(&self) -> u32 {
-        self.bind_group
-    }
-}
-
-impl<'a, V> VariableBind<'a, V, Immutable>
-where
-    V: Variable,
-{
+    /// This associated the variable, and thus will associate the correct buffer, to the
+    /// bind group which has `bind_group` value inside the shader code.
+    /// The variable is set as "mutable" by default, as it is considered [`unsafe`] for it to be immutable.
+    /// To set as immuable use [`VariableBind::set_immutable`] method.
+    /// Read [`VariableBind::is_mutable`] method for further explanation
+    /// # Arguments
+    /// * - `variable` - a reference to the variable to bind
+    /// * - `bind_group` - the bind group number the variabe will be associated with
+    // pub fn new_immutable(variable: &'a V, bind_group: u32) -> VariableBind<'a, V, Immutable> {
+    //     VariableBind {
+    //         variable,
+    //         bind_group,
+    //         mutable: std::marker::PhantomData::<Immutable>,
+    //     }
+    // }
     /// Sets the variable as mutable
     ///
     /// This tells the [`Algorithm`] that the variable coulbe be muted by a function
-    pub fn set_mutable(self) -> VariableBind<'a, V, Mutable> {
+    pub fn set_mutable(self) -> VariableBind<V, Mutable> {
         VariableBind {
             variable: self.variable,
             bind_group: self.bind_group,
@@ -418,33 +479,38 @@ where
     }
 }
 
-impl<V: Variable> PartialEq for VariableBind<'_, V> {
-    fn eq(&self, other: &Self) -> bool {
-        self.variable == other.variable
-            && self.bind_group == other.bind_group
-            && self.mutable == other.mutable
-    }
-}
+// impl<V: Variable> PartialEq for VariableBind<V> {
+//     fn eq(&self, other: &Self) -> bool {
+//         self.variable == other.variable
+//             && self.bind_group == other.bind_group
+//             && self.mutable == other.mutable
+//     }
+// }
 
-impl<V: Variable> StoredVariable<'_, V> {
-    fn get_var(&self) -> &V {
-        self.variable
-    }
+impl<V: Variable> StoredVariable<V> {
+    // fn get_var(&self) -> &V {
+    //     let variable = Arc::clone(&self.variable);
+    //     variable.lock().
+    // }
+    // fn get_buffer(&self) -> Option<&wgpu::Buffer> {
+    //     self.buffer.as_ref()
+    // }
 
-    fn get_buffer(&self) -> Option<&wgpu::Buffer> {
-        self.buffer.as_ref()
+    fn write_variable(&mut self, vec: Vec<f32>) {
+        self.variable.lock().unwrap().read_vec(vec)
     }
 
     /// Creates a [`wgpu::BindGroupLayoutEntry`] from [`self`]
     ///
     /// USeful to build the bind group layout for the executor to execute.
     pub fn get_bind_group_layout_entry(&self, bind: u32) -> wgpu::BindGroupLayoutEntry {
+        let size = self.buffer.as_ref().unwrap().size();
         wgpu::BindGroupLayoutEntry {
             binding: bind,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: false },
-                min_binding_size: NonZeroU64::new(self.buffer_descriptor.size),
+                min_binding_size: NonZeroU64::new(size),
                 has_dynamic_offset: false,
             },
             count: None,
@@ -452,13 +518,13 @@ impl<V: Variable> StoredVariable<'_, V> {
     }
 }
 
-impl<'a, V: Variable> StoredVariable<'a, V, Mutable> {
-    fn new(var: &'a V) -> StoredVariable<'a, V> {
-        let buffer_descriptor = var.to_buffer_descriptor();
-
+impl<'a, V: Variable> StoredVariable<V, Mutable> {
+    fn new(variable: Arc<Mutex<V>>) -> StoredVariable<V> {
+        // let buffer_descriptor = var.to_buffer_descriptor();
+        // let variable: Arc<Mutex<V>> = Arc::new(Mutex::new(*var));
         Self {
-            variable: var,
-            buffer_descriptor,
+            variable,
+            // buffer_descriptor,
             buffer: None,
             mutable: std::marker::PhantomData::<Mutable>,
         }
