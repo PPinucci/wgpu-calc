@@ -255,10 +255,13 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 self.variables.push(sto_var);
                 let var_ref_2 = Arc::clone(&var.variable);
                 let index = self.variables.len() - 1;
-                thread::spawn(move||{
+                // let handle = thread::spawn(move||{
                     let var_lock = var_ref_2.lock().unwrap();
                     let buf_lock = buffer.lock().unwrap();
-                    self.executor.write_buffer(&buf_lock, var_lock.byte_data())});
+                    self.executor.write_buffer(&buf_lock, var_lock.byte_data())
+                // });
+
+                // handle.join();
             }
             
 
