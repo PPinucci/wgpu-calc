@@ -20,6 +20,7 @@
 //!
 #![allow(dead_code)]
 use anyhow::{anyhow, Ok};
+use futures_intrusive::buffer::RingBuf;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 use std::ops::Deref;
@@ -27,6 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
 use crate::coding::Shader;
+use crate::errors::VariableError;
 use crate::interface::Executor;
 use crate::variable::{self, Variable};
 
@@ -47,7 +49,7 @@ use crate::variable::{self, Variable};
 pub struct Algorithm<'a, V: Variable> {
     variables: Vec<StoredVariable<V>>,
     modules: Vec<Module<'a>>,
-    buffers:Vec<Arc<Mutex<wgpu::Buffer>>>,
+    buffers:Vec<wgpu::Buffer>,
     operations: Vec<Operation<'a>>,
     label: Option<&'a str>,
     executor: Executor<'a>,
@@ -150,7 +152,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 let var_ref= Arc::clone(&var.variable);
                 let lock = var_ref.lock().unwrap();
                 let buffer_descriptor = lock.to_buffer_descriptor();
-                let buffer = Arc::new(Mutex::new(self.executor.get_buffer(&buffer_descriptor)));
+                let buffer = self.executor.get_buffer(&buffer_descriptor);
                 
                 let sto_var = StoredVariable{
                     variable:Arc::clone(&var.variable),
@@ -215,70 +217,86 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         let f_label = stringify!(function);
         let f_var = function.variables;
         let mut command_encoder = self.executor.create_encoder(Some(f_label));
-        command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label:Some(f_label) });
+        let mut compute_pass = command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label:Some(f_label) });
 
-        let mut positions = Vec::new();
-        let mut binds = true;
-        let mut operation_bind_layout_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
-        let mut operation_bind_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
+        let mut new_vars = Vec::new();
+        let mut new_binds = Vec::new();
+        let mut new_vars_count = 0;
+
 
 
         for var in f_var {
             if let Some(pos) = self.variables.iter().position(|sto_var| {
                 Arc::ptr_eq(&sto_var.variable, &var.variable)
             }) {
-                positions.push(pos)
+                new_binds.push([pos, var.bind_group as usize]);
             } else {
-                let var_ref= Arc::clone(&var.variable);
-                let var_lock1 = var_ref.lock().unwrap();
-                let buffer_descriptor = var_lock1.to_buffer_descriptor();
-                let buffer = Arc::new(Mutex::new(self.executor.get_buffer(&buffer_descriptor)));
-                self.buffers.push(Arc::clone(&buffer));
-                
-                
+                new_vars. push(Arc::clone(&var.variable));
+                new_binds.push([self.variables.len()+new_vars_count,var.bind_group as usize]);
+                new_vars_count +=1;
+            }
+        }
 
-                let sto_var = StoredVariable{
-                    variable:Arc::clone(&var.variable),
-                    binds: vec![var.bind_group as usize],
-                    buffer_index: self.buffers.len()-1,
-                };
-            
-                operation_bind_layout_entries.push(sto_var.get_bind_group_layout_entry(var.bind_group));         
-                
-                // operation_bind_entries.push(wgpu::BindGroupEntry {
-                //         binding: var.bind_group,
-                //         resource: self.buffers.last().unwrap().lock().unwrap().as_entire_binding(),
-                // });
-                
-                // let buf_lock = buffer.lock().unwrap();
+            for (sto_var,[var_pos,var_bind]) in new_vars.iter().zip(&new_binds) {
+                let var = Arc::clone(&sto_var);
+                let var_lock = var.lock().unwrap();
+                let buffer_descriptor = var_lock.to_buffer_descriptor();
 
-                self.variables.push(sto_var);
-                let var_ref_2 = Arc::clone(&var.variable);
-                let index = self.variables.len() - 1;
-                // let handle = thread::spawn(move||{
-                    let var_lock = var_ref_2.lock().unwrap();
-                    let buf_lock = buffer.lock().unwrap();
-                    self.executor.write_buffer(&buf_lock, var_lock.byte_data())
-                // });
-
-                // handle.join();
+                let buffer = self.executor.get_buffer(&buffer_descriptor);
+                
+                self.variables.push(StoredVariable { 
+                        variable: Arc::clone(&var), 
+                        binds: vec![*var_bind], 
+                        buffer_index: self.buffers.len()-1
+                     });
+                self.executor.write_buffer(&buffer, var_lock.byte_data());
+                self.buffers.push(buffer);
             }
             
+            let mut operation_bind_layout_entries = Vec::new();
+            let mut operation_bind_entries = Vec::new();
 
-        //     let bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
-        //         label: Some(f_label),
-        //         entries: &operation_bind_layout_entries,
-        //     };
+            for [var_pos,bind_group] in new_binds{
+                let mut sto_var = &mut self.variables[var_pos];
+                if bind_group == *sto_var.binds.last().unwrap() {
+                    continue;
+                }
+                operation_bind_layout_entries.push(sto_var.get_bind_group_layout_entry(bind_group as u32));
+                operation_bind_entries.push(wgpu::BindGroupEntry 
+                    { 
+                        binding: bind_group as u32, 
+                        resource: self.buffers[sto_var.buffer_index].as_entire_binding() 
+                    });
+                
+            }
 
-        //     let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
-        //     let bind_group_desriptor = wgpu::BindGroupDescriptor {
-        //         label: Some(f_label),
-        //         layout: &bind_layout,
-        //         entries: &operation_bind_entries,
-        //     };
-        //     let bind_group = self.executor.get_bind_group(&bind_group_desriptor);
+            let bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
+                label: Some(f_label),
+                entries: &operation_bind_layout_entries,
+            };
+            let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
+            
+            let bind_group_desriptor = wgpu::BindGroupDescriptor {
+                label: Some(f_label),
+                layout: &bind_layout,
+                entries: &operation_bind_entries,
+            };
+            let bind_group = self.executor.get_bind_group(&bind_group_desriptor);
+            
+            let mut command_encoder = self.executor.create_encoder(Some(f_label));
+
+            {
+            let mut compute_pass = command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label:Some(f_label) });
+        
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            }
+             // are we sure about that? maybe we can just pass command encoder and compute 
+             // pass in the Operation?
+            command_encoder.finish(); 
+
+
         }
-    }
+    
 
 
     pub fn get_operations(&self)-> Vec<Operation> {
@@ -306,8 +324,6 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     operation_bind_entries_pointer = Vec::new();
                     for (index, group) in bind_index.iter().zip(bind_groups) {
                         let sto_var = &self.variables[*index];
-                        let buffer_clone = Arc::clone(&self.buffers[sto_var.buffer_index]);
-                        let buffer = buffer_clone.lock().unwrap();
                         operation_bind_layout_entries
                             .push(sto_var.get_bind_group_layout_entry(*group));
 
@@ -329,7 +345,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     // let buffer = self.executor.get_buffer(&data_lock.to_buffer_descriptor());
                     
                     // // let buffer = &buffers[*variable_index];
-                    self.executor.write_buffer(&buffer.lock().unwrap(), data_lock.byte_data());
+                    self.executor.write_buffer(&buffer, data_lock.byte_data());
                     // self.variables[*variable_index].buffer = Some(buffer);
                                 }
                 Operation::Execute {
@@ -350,7 +366,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     let mut buffers = Vec::new();
                     for [_, buffer_index] in &operation_bind_entries_pointer {
 
-                        buffers.push(self.buffers[*buffer_index as usize].lock().unwrap())
+                        buffers.push(&self.buffers[*buffer_index as usize])
                     }
 
                     let mut operation_bind_entries = Vec::new();
@@ -424,7 +440,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             Some(index) => {
                 let buffer_index = self.variables[index].buffer_index;
                 let buffer = &self.buffers[buffer_index];
-                let output = self.executor.read_buffer(&buffer.lock().unwrap()).await;
+                let output = self.executor.read_buffer(&buffer).await;
                 // let slice = 
                 let mut var_write = self.variables[index].variable.lock().unwrap();
                 var_write.read_data(&output);

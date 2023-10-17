@@ -275,15 +275,15 @@ async fn add_matrices() {
     algorithm.finish().await.unwrap();
 
 
-    let output_1 = Arc::clone(&var_1);
-    let output_2 = Arc::clone(&var_2);
+    // let output_1 = Arc::clone(&var_1);
+    // let output_2 = Arc::clone(&var_2);
 
     algorithm
-        .get_output_unmap(&output_1)
+        .get_output_unmap(&var_1)
         .await
         .unwrap();
     algorithm
-        .get_output_unmap(&output_2)
+        .get_output_unmap(&var_2)
         .await
         .unwrap();
 
