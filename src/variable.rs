@@ -5,7 +5,7 @@ use wgpu::BufferDescriptor;
 
 pub trait Variable
 where
-    Self: PartialEq + Debug +Send,
+    Self: PartialEq + Debug + Send,
 {
     /// This gets a buffer descriptor from the [`Variable`] itself
     ///

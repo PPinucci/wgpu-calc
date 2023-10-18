@@ -275,17 +275,17 @@ impl Executor<'_> {
 
         let (sender, receiver) = futures_channel::oneshot::channel();
         staging_buffer
-        .slice(..)
-        .map_async(wgpu::MapMode::Read, |result| {
-            let _ = sender.send(result);
-        });
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| {
+                let _ = sender.send(result);
+            });
         self.device.poll(wgpu::Maintain::Wait); // TODO: poll in the background instead of blocking
         receiver
-        .await
-        .expect("communication failed")
-        .expect("buffer reading failed");
+            .await
+            .expect("communication failed")
+            .expect("buffer reading failed");
         let slice: &[u8] = &staging_buffer.slice(..).get_mapped_range();
-        return slice.to_owned()
+        return slice.to_owned();
     }
 }
 
@@ -336,12 +336,11 @@ mod interface_test {
 
         let array1_buffer_descriptor = wgpu::BufferDescriptor {
             label,
-            usage: 
-                wgpu::BufferUsages::STORAGE
+            usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
-                // | wgpu::BufferUsages::MAP_READ,
-            size: (std::mem::size_of::<f32>()*array.len()) as u64,
+            // | wgpu::BufferUsages::MAP_READ,
+            size: (std::mem::size_of::<f32>() * array.len()) as u64,
             mapped_at_creation: false,
         };
 
@@ -350,9 +349,9 @@ mod interface_test {
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC, // uniform is better in performance than Storaage, but has less storage space
-            size: (std::mem::size_of::<f32>()*array.len()) as u64,
+            size: (std::mem::size_of::<f32>() * array.len()) as u64,
             mapped_at_creation: false, // uniform is better in performance than Storaage, but has less storage space
-                    };
+        };
 
         let array1_buffer = executor.get_buffer(&array1_buffer_descriptor);
         let array2_buffer = executor.get_buffer(&array2_buffer_descriptor);
@@ -402,7 +401,6 @@ mod interface_test {
 
         let output = executor.read_buffer(&array1_buffer).await;
 
-
-        assert_eq!(bytemuck::cast_slice::<u8,f32>(&output),&[2.0;10000])
+        assert_eq!(bytemuck::cast_slice::<u8, f32>(&output), &[2.0; 10000])
     }
 }
