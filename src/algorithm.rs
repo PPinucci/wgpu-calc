@@ -21,6 +21,7 @@
 #![allow(dead_code)]
 use anyhow::{anyhow, Ok};
 use futures_intrusive::buffer::RingBuf;
+use wgpu::{ComputePass, CommandEncoderDescriptor};
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 use std::ops::Deref;
@@ -121,7 +122,7 @@ where
         command_encoder: wgpu::CommandEncoder,
         variables: Vec<Arc<Mutex<V>>>,
     },
-    Parallel(Vec<wgpu::CommandBuffer>),
+    Parallel(Vec<Solver<V>>),
 }
 
 impl<'a, V: Variable> Algorithm<'a, V> {
@@ -236,6 +237,8 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         let variables: Vec<Arc<Mutex<V>>> =
             f_var.iter().map(|var| Arc::clone(&var.variable)).collect();
 
+        let workgroups = variables[0].lock().unwrap().get_workgroup().unwrap();
+
         let mut new_vars = Vec::new();
         let mut new_binds = Vec::new();
         let mut new_vars_count = 0;
@@ -267,14 +270,16 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             self.variables.push(StoredVariable {
                 variable: Arc::clone(&var),
                 binds: vec![*var_bind],
-                buffer_index: self.buffers.len() - 1,
+                buffer_index: self.buffers.len(),
             });
             self.executor.write_buffer(&buffer, var_lock.byte_data());
             self.buffers.push(buffer);
         }
 
         let mut bind_layouts = Vec::new();
-        let bind_group;
+        let mut bind_group =None;
+
+        
 
         if new_binds.len() > 0 {
             let mut operation_bind_layout_entries = Vec::new();
@@ -304,16 +309,9 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 layout: &bind_layout,
                 entries: &operation_bind_entries,
             };
-            bind_group = self.executor.get_bind_group(&bind_group_desriptor);
+            bind_group = Some(self.executor.get_bind_group(&bind_group_desriptor));
 
             bind_layouts.push(bind_layout);
-
-            let mut compute_pass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some(f_label),
-                });
-
-            compute_pass.set_bind_group(0, &bind_group, &[]);
         }
 
         let module_pos;
@@ -362,20 +360,23 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             entry_point,
         };
         let pipeline: wgpu::ComputePipeline = self.executor.get_pipeline(&pipeline_descriptor);
-
         {
             let mut compute_pass =
                 command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(f_label),
                 });
+            if let Some(_) = bind_group {
+                compute_pass.set_bind_group(0, bind_group.as_ref().unwrap(), &[])
+            }
 
-            compute_pass.set_pipeline(&pipeline)
+            compute_pass.set_pipeline(&pipeline);
+            compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2])
         }
-
+                
         self.solvers.push(Solver::Serial {
             command_encoder,
             variables,
-        })
+        });
     }
 
     pub fn get_operations(&self) -> Vec<Operation> {
@@ -499,6 +500,42 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         return Ok(());
     }
 
+    pub async fn run(&mut self) -> Result<(), anyhow::Error> {
+        
+        for solver in &mut self.solvers.drain(0..) {
+            match solver {
+                Solver::Serial { mut command_encoder, variables } => {
+                // let workgroups = variables[0].lock().unwrap().get_workgroup()?;
+                // {
+                //     let mut compute_pass = command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Run") });
+                //     compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
+                // }
+            
+                    self.executor.execute([command_encoder.finish()].into_iter() );               
+                },
+
+                Solver::Parallel (solvers)=> {
+                    let mut buffers = Vec::new();
+                    for serial in solvers{
+                        match serial {
+                            Solver::Serial { mut command_encoder, variables }=> {
+                                // let workgroups = variables[0].lock().unwrap().get_workgroup()?;
+                                // {
+                                //     let mut compute_pass = command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Run") });
+                                //     compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
+                                // }
+                            
+                                buffers.push(command_encoder.finish()) 
+                            },
+                            _=> {return Err(anyhow!("Cannot nest multiple parallel solvers!"))}
+                        }
+                    }
+                    self.executor.execute(buffers.into_iter());
+                }
+            }
+        }
+        Ok(())
+    }
     /// This method overwrite the [`Variable`] *`var` with the ouptut of the calculation
     ///
     /// The function returns an error if the variable is not found in the [`Algorithm`] or

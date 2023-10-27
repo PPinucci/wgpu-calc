@@ -269,3 +269,36 @@ async fn add_matrices() {
     assert_eq!(result_1, check_1);
     assert_eq!(result_2, check_2);
 }
+
+#[tokio::test]
+async fn add_1_test_new() {
+    let array = array![[0., 0., 0.], [1., 1., 1.], [2., 2., 2.]];
+
+    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
+
+    let var = Arc::new(Mutex::new(GpuArray2::new(array, "test array")));
+
+    let shader = Shader::from_file_path("./tests/shaders/mat2calcs.wgsl").unwrap();
+
+    let bind1 = Arc::clone(&var);
+
+    let bindings = vec![VariableBind::new(bind1, 0)];
+
+    let function = Function::new(&shader, "add_1", bindings);
+
+    algorithm.add_fun(function);
+
+    // print!("{:?}", algorithm.get_operations())
+
+    algorithm.run().await.unwrap();
+
+    let output = Arc::clone(&var);
+
+    algorithm.get_output_unmap(&output).await.unwrap();
+
+    let var_lock = var.lock().unwrap();
+    let result = var_lock.to_array();
+    print!("{:?}", result);
+    let check = array![[1., 1., 1.], [2., 2., 2.], [3., 3., 3.]];
+    assert_eq!(result, check)
+}
