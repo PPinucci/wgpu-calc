@@ -20,18 +20,13 @@
 //!
 #![allow(dead_code)]
 use anyhow::{anyhow, Ok};
-use futures_intrusive::buffer::RingBuf;
-use wgpu::{ComputePass, CommandEncoderDescriptor};
-use std::fmt::Debug;
-use std::num::NonZeroU64;
-use std::ops::Deref;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
 
 use crate::coding::Shader;
-use crate::errors::VariableError;
 use crate::interface::Executor;
-use crate::variable::{self, Variable};
+use crate::variable::Variable;
+use std::fmt::Debug;
+use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex};
 
 /// This struct is the container for the different operations to perform
 ///
@@ -51,7 +46,7 @@ pub struct Algorithm<'a, V: Variable> {
     variables: Vec<StoredVariable<V>>,
     modules: Vec<Module<'a>>,
     buffers: Vec<wgpu::Buffer>,
-    operations: Vec<Operation<'a>>,
+    // operations: Vec<Operation<'a>>,
     label: Option<&'a str>,
     executor: Executor<'a>,
     solvers: Vec<Solver<V>>,
@@ -97,22 +92,6 @@ pub(super) struct Module<'a> {
     entry_point: Vec<&'a str>,
 }
 
-#[derive(Debug, Clone)]
-pub enum Operation<'a> {
-    BufferWrite {
-        variable_index: usize,
-        buffer_index: usize,
-    },
-    Bind {
-        bind_index: Vec<usize>,
-        bind_groups: Vec<u32>,
-    },
-    Execute {
-        module_index: usize,
-        entry_point_index: usize,
-        label: &'a str,
-    },
-}
 #[derive(Debug)]
 pub enum Solver<V>
 where
@@ -132,7 +111,6 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     pub async fn new(label: Option<&'a str>) -> Result<Algorithm<'a, V>, anyhow::Error> {
         let executor = Executor::new(label).await?;
         Ok(Algorithm {
-            operations: Vec::new(),
             variables: Vec::new(),
             modules: Vec::new(),
             buffers: Vec::new(),
@@ -140,89 +118,6 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             label,
             executor,
         })
-    }
-
-    /// Adds a [`Function`] to the [`Algorithm`]
-    ///
-    /// This function takes the [`Function`] and translate it into [`Operation`], at the same time optimizing
-    /// the calculation pipeline
-    ///
-    pub fn add_function(&mut self, function: Function<'a, V>)
-    where
-        V: Variable,
-    {
-        let f_label = stringify!(function);
-        let f_var = function.variables;
-        let mut binds = Operation::Bind {
-            bind_index: Vec::new(),
-            bind_groups: Vec::new(),
-        };
-        for var in f_var {
-            if let Some(pos) = self
-                .variables
-                .iter()
-                .position(|existing_var| Arc::ptr_eq(&existing_var.variable, &var.variable))
-            {
-                binds.add_bind(pos, var.bind_group).unwrap();
-            } else {
-                let var_ref = Arc::clone(&var.variable);
-                let lock = var_ref.lock().unwrap();
-                let buffer_descriptor = lock.to_buffer_descriptor();
-                let buffer = self.executor.get_buffer(&buffer_descriptor);
-
-                let sto_var = StoredVariable {
-                    variable: Arc::clone(&var.variable),
-                    binds: vec![var.bind_group as usize],
-                    buffer_index: self.buffers.len(),
-                    // buffer: Some(buffer),
-                    // mutable: std::marker::PhantomData::<Mutable>
-                };
-
-                self.variables.push(sto_var);
-                let index = self.variables.len() - 1;
-
-                self.buffers.push(buffer);
-
-                self.operations.push(Operation::BufferWrite {
-                    variable_index: index,
-                    buffer_index: self.buffers.len() - 1,
-                });
-                binds.add_bind(index, var.bind_group).unwrap();
-            }
-        }
-
-        self.operations.push(binds);
-
-        if let Some(pos) = self
-            .modules
-            .iter()
-            .position(|existing_module| existing_module.shader == function.shader)
-        {
-            if let Some(index) = self.modules[pos].find_entry_point(function.entry_point) {
-                self.operations.push(Operation::Execute {
-                    module_index: pos,
-                    entry_point_index: index,
-                    label: f_label,
-                })
-            } else {
-                self.modules[pos].add_entry_point(function.entry_point);
-                self.operations.push(Operation::Execute {
-                    module_index: pos,
-                    entry_point_index: &self.modules[pos].entry_point.len() - 1,
-                    label: f_label,
-                })
-            }
-        } else {
-            self.modules.push(Module {
-                shader: function.shader,
-                entry_point: vec![function.entry_point],
-            });
-            self.operations.push(Operation::Execute {
-                module_index: self.modules.len() - 1,
-                entry_point_index: 0,
-                label: f_label,
-            })
-        }
     }
 
     pub fn optimize(&mut self) {
@@ -242,6 +137,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         let mut new_vars = Vec::new();
         let mut new_binds = Vec::new();
         let mut new_vars_count = 0;
+        // let mut bind_flag = false;
 
         for var in f_var {
             if let Some(pos) = self
@@ -256,11 +152,12 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     self.variables.len() + new_vars_count,
                     var.bind_group as usize,
                 ]);
+                // bind_flag = true;
                 new_vars_count += 1;
             }
         }
 
-        for (sto_var, [var_pos, var_bind]) in new_vars.iter().zip(&new_binds) {
+        for (sto_var, [_, var_bind]) in new_vars.iter().zip(&new_binds) {
             let var = Arc::clone(&sto_var);
             let var_lock = var.lock().unwrap();
             let buffer_descriptor = var_lock.to_buffer_descriptor();
@@ -276,43 +173,41 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             self.buffers.push(buffer);
         }
 
-        let mut bind_layouts = Vec::new();
-        let mut bind_group =None;
+        // let mut bind_layouts = Vec::new();
 
-        
+        let mut operation_bind_layout_entries = Vec::new();
+        let mut operation_bind_entries = Vec::new();
 
-        if new_binds.len() > 0 {
-            let mut operation_bind_layout_entries = Vec::new();
-            let mut operation_bind_entries = Vec::new();
+        // let mut bind_group = None;
 
-            for [var_pos, bind_group] in new_binds {
-                let sto_var = &mut self.variables[var_pos];
-                if bind_group == *sto_var.binds.last().unwrap() {
-                    continue;
-                }
-                operation_bind_layout_entries
-                    .push(sto_var.get_bind_group_layout_entry(bind_group as u32));
-                operation_bind_entries.push(wgpu::BindGroupEntry {
-                    binding: bind_group as u32,
-                    resource: self.buffers[sto_var.buffer_index].as_entire_binding(),
-                });
-            }
-
-            let bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
-                label: Some(f_label),
-                entries: &operation_bind_layout_entries,
-            };
-            let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
-
-            let bind_group_desriptor = wgpu::BindGroupDescriptor {
-                label: Some(f_label),
-                layout: &bind_layout,
-                entries: &operation_bind_entries,
-            };
-            bind_group = Some(self.executor.get_bind_group(&bind_group_desriptor));
-
-            bind_layouts.push(bind_layout);
+        for [var_pos, bind_group] in new_binds {
+            let sto_var = &mut self.variables[var_pos];
+            // if !bind_flag && *sto_var.binds.last().unwrap() != bind_group {
+            //     bind_flag = true
+            // }
+            operation_bind_layout_entries
+                .push(sto_var.get_bind_group_layout_entry(bind_group as u32));
+            operation_bind_entries.push(wgpu::BindGroupEntry {
+                binding: bind_group as u32,
+                resource: self.buffers[sto_var.buffer_index].as_entire_binding(),
+            });
         }
+
+        let bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
+            label: Some(f_label),
+            entries: &operation_bind_layout_entries,
+        };
+        let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
+
+        // if bind_flag {
+        let bind_group_desriptor = wgpu::BindGroupDescriptor {
+            label: Some(f_label),
+            layout: &bind_layout,
+            entries: &operation_bind_entries,
+        };
+        let bind_group = self.executor.get_bind_group(&bind_group_desriptor);
+        // }
+        // bind_layouts.push(bind_layout);
 
         let module_pos;
         let entry_point_pos;
@@ -343,7 +238,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
 
         let pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
             label: Some(f_label),
-            bind_group_layouts: &[&bind_layouts[0]],
+            bind_group_layouts: &[&bind_layout],
             push_constant_ranges: &[],
         };
 
@@ -365,169 +260,38 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(f_label),
                 });
-            if let Some(_) = bind_group {
-                compute_pass.set_bind_group(0, bind_group.as_ref().unwrap(), &[])
-            }
+            // if let Some(_) = bind_group {
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            // }
 
             compute_pass.set_pipeline(&pipeline);
             compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2])
         }
-                
+
         self.solvers.push(Solver::Serial {
             command_encoder,
             variables,
         });
     }
 
-    pub fn get_operations(&self) -> Vec<Operation> {
-        self.operations.clone()
-    }
-
-    ///
-    pub async fn finish(&mut self) -> Result<(), anyhow::Error> {
-        // self.optimize();
-
-        let mut workgroups = [0 as u32; 3];
-
-        let mut operation_bind_layout_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
-        let mut operation_bind_entries_pointer = Vec::new();
-
-        for operation in &self.operations {
-            match operation {
-                Operation::Bind {
-                    bind_index,
-                    bind_groups,
-                } => {
-                    operation_bind_layout_entries = Vec::new();
-                    operation_bind_entries_pointer = Vec::new();
-                    for (index, group) in bind_index.iter().zip(bind_groups) {
-                        let sto_var = &self.variables[*index];
-                        operation_bind_layout_entries
-                            .push(sto_var.get_bind_group_layout_entry(*group));
-
-                        operation_bind_entries_pointer.push([*group, sto_var.buffer_index as u32]);
-                        //     binding: *group,
-                        //     resource: buffer.as_entire_binding(),
-                        // });
-                        workgroups = self.variables[*index]
-                            .variable
-                            .lock()
-                            .unwrap()
-                            .get_workgroup()?;
-                    }
-                }
-                Operation::BufferWrite {
-                    variable_index,
-                    buffer_index,
-                } => {
-                    let buffer = &self.buffers[*buffer_index];
-                    let sto_var = &self.variables[*variable_index];
-                    let data_lock = sto_var.variable.lock().unwrap();
-                    // let buffer = self.executor.get_buffer(&data_lock.to_buffer_descriptor());
-
-                    // // let buffer = &buffers[*variable_index];
-                    self.executor.write_buffer(&buffer, data_lock.byte_data());
-                    // self.variables[*variable_index].buffer = Some(buffer);
-                }
-                Operation::Execute {
-                    module_index,
-                    entry_point_index,
-                    label,
-                } => {
-                    let shader = self.modules[*module_index].shader;
-                    let entry_point = self.modules[*module_index].entry_point[*entry_point_index];
-
-                    let bind_layout_descriptor = wgpu::BindGroupLayoutDescriptor {
-                        label: Some(label),
-                        entries: &operation_bind_layout_entries,
-                    };
-
-                    let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
-
-                    let mut buffers = Vec::new();
-                    for [_, buffer_index] in &operation_bind_entries_pointer {
-                        buffers.push(&self.buffers[*buffer_index as usize])
-                    }
-
-                    let mut operation_bind_entries = Vec::new();
-
-                    for (id, buffer) in buffers.iter().enumerate() {
-                        // let lock = buffer.lock().unwrap();
-                        operation_bind_entries.push(wgpu::BindGroupEntry {
-                            binding: operation_bind_entries_pointer[id][0],
-                            resource: buffer.as_entire_binding(),
-                        });
-                    }
-
-                    let bind_group_desriptor = wgpu::BindGroupDescriptor {
-                        label: Some(label),
-                        layout: &bind_layout,
-                        entries: &operation_bind_entries,
-                    };
-                    let bind_group = self.executor.get_bind_group(&bind_group_desriptor);
-
-                    let pipeline_layout_descriptor = wgpu::PipelineLayoutDescriptor {
-                        label: Some(label),
-                        bind_group_layouts: &[&bind_layout],
-                        push_constant_ranges: &[],
-                    };
-
-                    let pipeline_layout = self
-                        .executor
-                        .get_pipeline_layout(&pipeline_layout_descriptor);
-
-                    let shader_module = self.executor.get_shader_module(shader);
-
-                    let pipeline_descriptor = wgpu::ComputePipelineDescriptor {
-                        label: Some(label),
-                        layout: Some(&pipeline_layout),
-                        module: &shader_module,
-                        entry_point,
-                    };
-                    let pipeline: wgpu::ComputePipeline =
-                        self.executor.get_pipeline(&pipeline_descriptor);
-
-                    let command_buffer = [self
-                        .executor
-                        .dispatch_bind_and_pipeline(&bind_group, &pipeline, &workgroups, None)
-                        .finish()];
-
-                    self.executor.execute(command_buffer.into_iter());
-                }
-            }
-        }
-        self.operations = Vec::new();
-        return Ok(());
-    }
-
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
-        
         for solver in &mut self.solvers.drain(0..) {
             match solver {
-                Solver::Serial { mut command_encoder, variables } => {
-                // let workgroups = variables[0].lock().unwrap().get_workgroup()?;
-                // {
-                //     let mut compute_pass = command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Run") });
-                //     compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
-                // }
-            
-                    self.executor.execute([command_encoder.finish()].into_iter() );               
-                },
+                Solver::Serial {
+                    command_encoder, ..
+                } => {
+                    self.executor
+                        .execute([command_encoder.finish()].into_iter());
+                }
 
-                Solver::Parallel (solvers)=> {
+                Solver::Parallel(solvers) => {
                     let mut buffers = Vec::new();
-                    for serial in solvers{
+                    for serial in solvers {
                         match serial {
-                            Solver::Serial { mut command_encoder, variables }=> {
-                                // let workgroups = variables[0].lock().unwrap().get_workgroup()?;
-                                // {
-                                //     let mut compute_pass = command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Run") });
-                                //     compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
-                                // }
-                            
-                                buffers.push(command_encoder.finish()) 
-                            },
-                            _=> {return Err(anyhow!("Cannot nest multiple parallel solvers!"))}
+                            Solver::Serial {
+                                command_encoder, ..
+                            } => buffers.push(command_encoder.finish()),
+                            _ => return Err(anyhow!("Cannot nest multiple parallel solvers!")),
                         }
                     }
                     self.executor.execute(buffers.into_iter());
@@ -536,6 +300,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         }
         Ok(())
     }
+
     /// This method overwrite the [`Variable`] *`var` with the ouptut of the calculation
     ///
     /// The function returns an error if the variable is not found in the [`Algorithm`] or
@@ -708,23 +473,5 @@ impl<'a> Module<'a> {
 
     pub(super) fn find_entry_point(&self, e_p: &'a str) -> Option<usize> {
         self.entry_point.iter().position(|&entry| entry == e_p)
-    }
-}
-
-impl Operation<'_> {
-    fn add_bind(&mut self, index: usize, bind_group: u32) -> Result<(), anyhow::Error> {
-        match self {
-            Operation::Bind {
-                bind_index,
-                bind_groups,
-            } => {
-                bind_index.push(index);
-                bind_groups.push(bind_group);
-                Ok(())
-            }
-            _ => Err(anyhow::anyhow!(
-                "Can't add a bind to any operation which is not an [`Operation::Bind`]"
-            )),
-        }
     }
 }

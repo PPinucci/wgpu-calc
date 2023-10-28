@@ -65,212 +65,6 @@ impl Variable for GpuArray2<'_> {
 }
 
 #[tokio::test]
-async fn add_1_test() {
-    let array = array![[0., 0., 0.], [1., 1., 1.], [2., 2., 2.]];
-
-    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
-
-    let var = Arc::new(Mutex::new(GpuArray2::new(array, "test array")));
-
-    let shader = Shader::from_file_path("./tests/shaders/mat2calcs.wgsl").unwrap();
-
-    let bind1 = Arc::clone(&var);
-
-    let bindings = vec![VariableBind::new(bind1, 0)];
-
-    let function = Function::new(&shader, "add_1", bindings);
-
-    algorithm.add_function(function);
-
-    // print!("{:?}", algorithm.get_operations())
-
-    algorithm.finish().await.unwrap();
-
-    let output = Arc::clone(&var);
-
-    algorithm.get_output_unmap(&output).await.unwrap();
-
-    let var_lock = var.lock().unwrap();
-    let result = var_lock.to_array();
-    print!("{:?}", result);
-    let check = array![[1., 1., 1.], [2., 2., 2.], [3., 3., 3.]];
-    assert_eq!(result, check)
-}
-
-#[tokio::test]
-async fn add_1_large() {
-    let array = Array2::zeros((500, 500));
-
-    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
-
-    let var = Arc::new(Mutex::new(GpuArray2::new(array, "test array")));
-    let (nrows, ncols) = var.lock().unwrap().get_dims();
-
-    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
-    shader.replace("€ncol", ncols.to_string().as_str());
-    shader.replace("€nrow", nrows.to_string().as_str());
-
-    let bind1 = Arc::clone(&var);
-
-    let bindings = vec![VariableBind::new(bind1, 0)];
-
-    let function = Function::new(&shader, "add_1", bindings);
-
-    algorithm.add_function(function);
-
-    // print!("{:?}", algorithm.get_operations())
-
-    algorithm.finish().await.unwrap();
-
-    let output = Arc::clone(&var);
-
-    algorithm.get_output_unmap(&output).await.unwrap();
-
-    let var_lock = var.lock().unwrap();
-    let result = var_lock.to_array();
-    let check = Array2::ones((500, 500));
-    assert_eq!(result, check)
-}
-
-#[tokio::test]
-async fn add_1_two_buffers() {
-    let array_1 = Array2::zeros((500, 500));
-    let array_2 = Array2::zeros((500, 500));
-
-    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
-
-    let var_1 = Arc::new(Mutex::new(GpuArray2::new(array_1, "array_1")));
-    let var_2 = Arc::new(Mutex::new(GpuArray2::new(array_2, "array_1")));
-
-    let (nrows, ncols) = var_1.lock().unwrap().get_dims();
-
-    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
-    shader.replace("€ncol", ncols.to_string().as_str());
-    shader.replace("€nrow", nrows.to_string().as_str());
-
-    let bind1 = Arc::clone(&var_1);
-    let bind2 = Arc::clone(&var_2);
-
-    let bindings_1 = vec![VariableBind::new(bind1, 0)];
-    let bindings_2 = vec![VariableBind::new(bind2, 0)];
-
-    let function1 = Function::new(&shader, "add_1", bindings_1);
-    let function2 = Function::new(&shader, "add_1", bindings_2);
-
-    algorithm.add_function(function1);
-    algorithm.add_function(function2);
-
-    // print!("{:?}", algorithm.get_operations())
-
-    algorithm.finish().await.unwrap();
-
-    let output_1 = Arc::clone(&var_1);
-    let output_2 = Arc::clone(&var_2);
-
-    algorithm.get_output_unmap(&output_1).await.unwrap();
-    algorithm.get_output_unmap(&output_2).await.unwrap();
-
-    let var_lock_1 = var_1.lock().unwrap();
-    let var_lock_2 = var_2.lock().unwrap();
-
-    let result_1 = var_lock_1.to_array();
-    let result_2 = var_lock_2.to_array();
-
-    let check = Array2::ones((500, 500));
-    assert_eq!(result_1, check);
-    assert_eq!(result_2, check);
-}
-
-#[tokio::test]
-async fn add_1_two_binds_same_var() {
-    let array_1 = Array2::zeros((500, 500));
-
-    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
-
-    let var_1 = Arc::new(Mutex::new(GpuArray2::new(array_1, "array_1")));
-
-    let (nrows, ncols) = var_1.lock().unwrap().get_dims();
-
-    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
-    shader.replace("€ncol", ncols.to_string().as_str());
-    shader.replace("€nrow", nrows.to_string().as_str());
-
-    let bind1 = Arc::clone(&var_1);
-    let bind2 = Arc::clone(&var_1);
-
-    let bindings_1 = vec![VariableBind::new(bind1, 0)];
-    let bindings_2 = vec![VariableBind::new(bind2, 0)];
-
-    let function1 = Function::new(&shader, "add_1", bindings_1);
-    let function2 = Function::new(&shader, "add_1", bindings_2);
-
-    algorithm.add_function(function1);
-    algorithm.add_function(function2);
-
-    print!("{:?}", algorithm.get_operations());
-
-    algorithm.finish().await.unwrap();
-
-    let output_1 = Arc::clone(&var_1);
-
-    algorithm.get_output_unmap(&output_1).await.unwrap();
-
-    let var_lock_1 = var_1.lock().unwrap();
-
-    let result_1 = var_lock_1.to_array();
-
-    let check = Array2::ones((500, 500)) + 1.0;
-    assert_eq!(result_1, check);
-}
-
-#[tokio::test]
-async fn add_matrices() {
-    let array_1 = Array2::ones((500, 500));
-    let array_2 = Array2::ones((500, 500));
-
-    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
-
-    let var_1 = Arc::new(Mutex::new(GpuArray2::new(array_1, "array_1")));
-    let var_2 = Arc::new(Mutex::new(GpuArray2::new(array_2, "array_1")));
-
-    let (nrows, ncols) = var_1.lock().unwrap().get_dims();
-
-    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
-    shader.replace("€ncol", ncols.to_string().as_str());
-    shader.replace("€nrow", nrows.to_string().as_str());
-
-    let bind1 = Arc::clone(&var_1);
-    let bind2 = Arc::clone(&var_2);
-
-    let bindings_1 = vec![VariableBind::new(bind1, 0), VariableBind::new(bind2, 1)];
-
-    let function1 = Function::new(&shader, "add_matrices", bindings_1);
-
-    algorithm.add_function(function1);
-
-    // print!("{:?}", algorithm.get_operations())
-
-    algorithm.finish().await.unwrap();
-
-    // let output_1 = Arc::clone(&var_1);
-    // let output_2 = Arc::clone(&var_2);
-
-    algorithm.get_output_unmap(&var_1).await.unwrap();
-    algorithm.get_output_unmap(&var_2).await.unwrap();
-
-    let var_lock_1 = var_1.lock().unwrap();
-    let var_lock_2 = var_2.lock().unwrap();
-
-    let result_1 = var_lock_1.to_array();
-    let result_2 = var_lock_2.to_array();
-
-    let check_2 = Array2::ones((500, 500));
-    let check_1 = Array2::ones((500, 500)) + 1.0;
-    assert_eq!(result_1, check_1);
-    assert_eq!(result_2, check_2);
-}
-
-#[tokio::test]
 async fn add_1_test_new() {
     let array = array![[0., 0., 0.], [1., 1., 1.], [2., 2., 2.]];
 
@@ -301,4 +95,172 @@ async fn add_1_test_new() {
     print!("{:?}", result);
     let check = array![[1., 1., 1.], [2., 2., 2.], [3., 3., 3.]];
     assert_eq!(result, check)
+}
+#[tokio::test]
+async fn add_1_large_new() {
+    let array = Array2::zeros((5000, 5000));
+
+    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
+
+    let var = Arc::new(Mutex::new(GpuArray2::new(array, "test array")));
+    let (nrows, ncols) = var.lock().unwrap().get_dims();
+
+    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
+    shader.replace("€ncol", ncols.to_string().as_str());
+    shader.replace("€nrow", nrows.to_string().as_str());
+
+    let bind1 = Arc::clone(&var);
+
+    let bindings = vec![VariableBind::new(bind1, 0)];
+
+    let function = Function::new(&shader, "add_1", bindings);
+
+    algorithm.add_fun(function);
+
+    // print!("{:?}", algorithm.get_operations())
+
+    algorithm.run().await.unwrap();
+
+    let output = Arc::clone(&var);
+
+    algorithm.get_output_unmap(&output).await.unwrap();
+
+    let var_lock = var.lock().unwrap();
+    let result = var_lock.to_array();
+    let check = Array2::ones((5000, 5000));
+    assert_eq!(result, check)
+}
+
+#[tokio::test]
+async fn add_1_two_buffers_new() {
+    let array_1 = Array2::zeros((500, 500));
+    let array_2 = Array2::zeros((500, 500));
+
+    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
+
+    let var_1 = Arc::new(Mutex::new(GpuArray2::new(array_1, "array_1")));
+    let var_2 = Arc::new(Mutex::new(GpuArray2::new(array_2, "array_1")));
+
+    let (nrows, ncols) = var_1.lock().unwrap().get_dims();
+
+    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
+    shader.replace("€ncol", ncols.to_string().as_str());
+    shader.replace("€nrow", nrows.to_string().as_str());
+
+    let bind1 = Arc::clone(&var_1);
+    let bind2 = Arc::clone(&var_2);
+
+    let bindings_1 = vec![VariableBind::new(bind1, 0)];
+    let bindings_2 = vec![VariableBind::new(bind2, 0)];
+
+    let function1 = Function::new(&shader, "add_1", bindings_1);
+    let function2 = Function::new(&shader, "add_1", bindings_2);
+
+    algorithm.add_fun(function1);
+    algorithm.add_fun(function2);
+
+    algorithm.run().await.unwrap();
+
+    let output_1 = Arc::clone(&var_1);
+    let output_2 = Arc::clone(&var_2);
+
+    algorithm.get_output_unmap(&output_1).await.unwrap();
+    algorithm.get_output_unmap(&output_2).await.unwrap();
+
+    let var_lock_1 = var_1.lock().unwrap();
+    let var_lock_2 = var_2.lock().unwrap();
+
+    let result_1 = var_lock_1.to_array();
+    let result_2 = var_lock_2.to_array();
+
+    let check = Array2::ones((500, 500));
+    assert_eq!(result_1, check);
+    assert_eq!(result_2, check);
+}
+
+#[tokio::test]
+async fn add_1_two_binds_same_var_new() {
+    let array_1 = Array2::zeros((500, 500));
+
+    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
+
+    let var_1 = Arc::new(Mutex::new(GpuArray2::new(array_1, "array_1")));
+
+    let (nrows, ncols) = var_1.lock().unwrap().get_dims();
+
+    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
+    shader.replace("€ncol", ncols.to_string().as_str());
+    shader.replace("€nrow", nrows.to_string().as_str());
+
+    let bind1 = Arc::clone(&var_1);
+    let bind2 = Arc::clone(&var_1);
+
+    let bindings_1 = vec![VariableBind::new(bind1, 0)];
+    let bindings_2 = vec![VariableBind::new(bind2, 0)];
+
+    let function1 = Function::new(&shader, "add_1", bindings_1);
+    let function2 = Function::new(&shader, "add_1", bindings_2);
+
+    algorithm.add_fun(function1);
+    algorithm.add_fun(function2);
+
+    algorithm.run().await.unwrap();
+
+    let output_1 = Arc::clone(&var_1);
+
+    algorithm.get_output_unmap(&output_1).await.unwrap();
+
+    let var_lock_1 = var_1.lock().unwrap();
+
+    let result_1 = var_lock_1.to_array();
+
+    let check = Array2::ones((500, 500)) + 1.0;
+    assert_eq!(result_1, check);
+}
+
+#[tokio::test]
+async fn add_matrices_new() {
+    let array_1 = Array2::ones((500, 500));
+    let array_2 = Array2::ones((500, 500));
+
+    let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
+
+    let var_1 = Arc::new(Mutex::new(GpuArray2::new(array_1, "array_1")));
+    let var_2 = Arc::new(Mutex::new(GpuArray2::new(array_2, "array_1")));
+
+    let (nrows, ncols) = var_1.lock().unwrap().get_dims();
+
+    let mut shader = Shader::from_file_path("./tests/shaders/mat2calcs.pwgsl").unwrap();
+    shader.replace("€ncol", ncols.to_string().as_str());
+    shader.replace("€nrow", nrows.to_string().as_str());
+
+    let bind1 = Arc::clone(&var_1);
+    let bind2 = Arc::clone(&var_2);
+
+    let bindings_1 = vec![VariableBind::new(bind1, 0), VariableBind::new(bind2, 1)];
+
+    let function1 = Function::new(&shader, "add_matrices", bindings_1);
+
+    algorithm.add_fun(function1);
+
+    // print!("{:?}", algorithm.get_operations())
+
+    algorithm.run().await.unwrap();
+
+    // let output_1 = Arc::clone(&var_1);
+    // let output_2 = Arc::clone(&var_2);
+
+    algorithm.get_output_unmap(&var_1).await.unwrap();
+    algorithm.get_output_unmap(&var_2).await.unwrap();
+
+    let var_lock_1 = var_1.lock().unwrap();
+    let var_lock_2 = var_2.lock().unwrap();
+
+    let result_1 = var_lock_1.to_array();
+    let result_2 = var_lock_2.to_array();
+
+    let check_2 = Array2::ones((500, 500));
+    let check_1 = Array2::ones((500, 500)) + 1.0;
+    assert_eq!(result_1, check_1);
+    assert_eq!(result_2, check_2);
 }
