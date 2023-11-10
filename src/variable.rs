@@ -3,10 +3,10 @@ use core::fmt::Debug;
 use wgpu::BufferDescriptor;
 
 /// This trait is the entry point to make a Rust type GPU compatible
-/// 
+///
 /// It's still in early stage, but it contains all that is needed to a [`Function`] or
 /// an [`Algorithm`] to perform the needed operations on the GPU.
-/// 
+///
 /// It has some default implementations, but most of the critical pieces need still to be manually implemented,
 /// since they're heavily dependent from the associated type.
 ///  
@@ -32,7 +32,7 @@ where
     }
 
     /// Gets an optional name associated with the [`Variable`]
-    /// 
+    ///
     /// It is useful to always give variables a name for debugging purposes.
     fn get_name(&self) -> Option<&str>;
 
@@ -71,9 +71,9 @@ where
 
     /// This method defines the workgroup count for the object
     ///
-    /// It takes the dimension of the object and counts how many groups are needed to calculate the 
+    /// It takes the dimension of the object and counts how many groups are needed to calculate the
     /// variable in parallel.
-    /// 
+    ///
     /// # Errors
     /// - if the variable size in one or more direction is over the limit imposed by WGLS standard limits.
     fn get_workgroup(&self) -> Result<[u32; 3], anyhow::Error>

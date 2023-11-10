@@ -1,11 +1,11 @@
 use std::{error::Error, path::Path};
 
 /// The [`Shader`] is a struct containing WGSL code
-/// 
-/// This struct is not able to read or check WGSL code, it's only purpose is to 
+///
+/// This struct is not able to read or check WGSL code, it's only purpose is to
 /// hold the content of it, evantually manipulate it, and feeding it to a [`wgpu_calc::function::Function`]
-/// 
-/// All the code checking is done at compile time by `Naga` (called by `wgpu`), and never through this stage of the 
+///
+/// All the code checking is done at compile time by `Naga` (called by `wgpu`), and never through this stage of the
 /// program
 /// On one side this doesn't avoid any wrong code to be submitted to a [`Function`], which will be catch only at runtime,
 /// but at the same time it allows to write pseudo code and to manipulate it at runtime.
@@ -128,7 +128,7 @@ impl Shader {
     }
 
     /// This methods gets the content of the [`Shader`] as a string reference
-    /// 
+    ///
     /// It can be used for debugging, checking or to manipulate the wgls shader before
     /// inserting it in another [`Shader`] instance.
     pub fn get_content(&self) -> &str {

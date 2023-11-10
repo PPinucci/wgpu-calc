@@ -54,7 +54,7 @@ impl<'a> GpuArray2<'a> {
 // implementing the [`Variable`] trait is pretty simple for this struct
 impl Variable for GpuArray2<'_> {
     // the byte size of the array is simply the dimensions by the size of an f32
-    // keep in mind that building a more complex size could be complicated due to the 
+    // keep in mind that building a more complex size could be complicated due to the
     // necessity of arranging the memory correclty in the GPU
     fn byte_size(&self) -> u64 {
         let base_size: u64 = std::mem::size_of::<f32>() as u64;
@@ -78,7 +78,7 @@ impl Variable for GpuArray2<'_> {
         Some(self.name)
     }
 
-    // This is the opposite of the [`byte_data`] method, used to read variabled back from 
+    // This is the opposite of the [`byte_data`] method, used to read variabled back from
     // an array of u8
     fn read_data(&mut self, slice: &[u8]) {
         let vec: Vec<f32> = bytemuck::cast_slice(slice).to_owned();
@@ -91,11 +91,11 @@ async fn main() {
     // we create a ndarray
     let array = array![[0., 0., 0.], [1., 1., 1.], [2., 2., 2.]];
 
-    // we start the Algorithm (this will also get the GPU device from the machine and set the 
+    // we start the Algorithm (this will also get the GPU device from the machine and set the
     // correct compiler)
     let mut algorithm = Algorithm::new(Some("Test algorithm")).await.unwrap();
 
-    // we create a Variable and put inside a Arc<Mutex>. This is needed to be able to 
+    // we create a Variable and put inside a Arc<Mutex>. This is needed to be able to
     // have a shared reference of it during the instantiation of the calculi
     let var = Arc::new(Mutex::new(GpuArray2::new(array, "test array")));
 
@@ -104,10 +104,10 @@ async fn main() {
          struct Mat2 {
              elements: array<array<f32,3>,3>,
              }
-    
+
          @group(0) @binding(0)
          var<storage,read_write>  a: Mat2;
-    
+
          @compute @workgroup_size(1,1)
          fn add_1 (@builtin(global_invocation_id) id: vec3<u32>) {
              a.elements[id.x][id.y] = a.elements[id.x][id.y] + 1.0;
@@ -124,14 +124,14 @@ async fn main() {
     let function = Function::new(&shader, "add_1", bindings);
 
     // we add the function to the algorithm. Notice this will not execute anything, and
-    // we could add more of them to be executed sequentially. In this step the variable is 
+    // we could add more of them to be executed sequentially. In this step the variable is
     // written in the GPU buffer
     algorithm.add_fun(function);
 
     // this phisically executes all the added functions on the GPU
     algorithm.run().await.unwrap();
 
-    // we need to use this method to extract a variable. This 
+    // we need to use this method to extract a variable. This
     // operation is expensive since it copies data from the GPU to the CPU
     // this is why it's not done automatically for all the variables
     algorithm.get_output_unmap(&var).await.unwrap();
@@ -141,7 +141,7 @@ async fn main() {
 
     // we convert back the variable to the original format (ndarray::Array in this case)
     let result = var_lock.to_array();
-    
+
     // we verify that the calculus is infact correct and the result is the original array
     // with 1 added to each element
     let check = array![[1., 1., 1.], [2., 2., 2.], [3., 3., 3.]];
@@ -155,8 +155,8 @@ kind of linear algebra with 1D to 3D matrices) more work is still needed to make
 to the API user, like automatic padding for structs or more default implementations of the Variable trait
 
 To notice also that the [`algorithm::Algorithm`] currently executes the [`algorithm::Function`]s only serially, i.e. each function is submitted to be run
-in parallel in the GPU in the order it's added to the [`algorithm::Algorithm`]. 
-The infrastructure of the crate is already in place to optimize and run in parallel functions which don't act on the same [`variable::Variable`]. 
+in parallel in the GPU in the order it's added to the [`algorithm::Algorithm`].
+The infrastructure of the crate is already in place to optimize and run in parallel functions which don't act on the same [`variable::Variable`].
 
 Another improvement to be done is the parallelisation of the buffers write, which is always the worst bottleneck of the CPU-GPU interface.
 */
