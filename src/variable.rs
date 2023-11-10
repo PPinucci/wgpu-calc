@@ -1,4 +1,3 @@
-use crate::algorithm::Algorithm;
 use crate::errors::VariableError;
 use core::fmt::Debug;
 use wgpu::BufferDescriptor;
@@ -11,6 +10,7 @@ use wgpu::BufferDescriptor;
 /// It has some default implementations, but most of the critical pieces need still to be manually implemented,
 /// since they're heavily dependent from the associated type.
 ///  
+/// Please refer to the principal example to see an implementation example.
 pub trait Variable
 where
     Self: PartialEq + Debug + Send,
