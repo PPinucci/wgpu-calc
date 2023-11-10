@@ -4,7 +4,6 @@
 //! using the [`wgpu`] crate and its functions.
 
 #![allow(dead_code)]
-// use futures-channel;
 use crate::coding::Shader;
 use wgpu::util::DeviceExt;
 
@@ -22,17 +21,24 @@ pub struct Executor<'a> {
 }
 
 impl Executor<'_> {
-    /// This function creates sets up the connection with the GPU and allows to start creating the calculations and memory management pipeline
-    /// will create an instance of [`GpuInterface`] with empty buffers.
-    /// To use it simply write
+    /// This function creates sets up the connection with the GPU 
+    /// 
+    /// The struct is responsible than of the comunication with the GPU itself, both in termns of
+    /// sending data back and forth, and in terms of creating all the pieces needed to perform the operation.
+    /// 
+    /// It is contained inside a [`algorithm::Algorithm`] to perform operations on a set of [`Variable`], but could be
+    /// used alone to perform some more basilar operations.
+    /// 
+    /// # Example
     /// ```
     /// use wgpu_calc::interface::Executor;
     /// use pollster;
     ///
     /// let interface = pollster::block_on(Executor::new(Some("Label for debugging purposes"))).unwrap();
     /// ```
-    /// this will create the interface you can use to manage the calulations.
-    /// It's an anync function.
+    /// # Arguments
+    ///*- `label` - an optional label for debugging purposes
+    /// 
     /// # Panics
     /// - if no adapter is found (default settings, should be rare). Limits are furtherly restricted in case this is compiled for wasm32
     /// - if device don't match features and limits (default settings, should be very rare)
@@ -65,7 +71,7 @@ impl Executor<'_> {
         }
     }
 
-    /// This function finds the adapters and gives back an Option value. It's primary purpose is the use with [`GpuInterface::new`] function
+    // This function finds the adapters and gives back an Option value. It's primary purpose is the use with [`GpuInterface::new`] function
     async fn find_adapter() -> Option<wgpu::Adapter> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(), // this is to get all the possible backends
@@ -98,22 +104,22 @@ impl Executor<'_> {
     ///     label: Some("input bind group layout"),
     ///     entries: &[
     ///         wgpu::BindGroupLayoutEntry{
-    ///             binding: 0, // this is where we will bind the input in the shader
-    ///           visibility: wgpu::ShaderStages::COMPUTE, // the type of function this will be visible in
+    ///             binding: 0, 
+    ///           visibility: wgpu::ShaderStages::COMPUTE,
     ///             ty: wgpu::BindingType::Buffer {
-    ///                 ty: wgpu::BufferBindingType::Storage { read_only: false }, // Uniform buffer are faster than storage, but smaller in max size.
+    ///                 ty: wgpu::BufferBindingType::Storage { read_only: false },
     ///                 has_dynamic_offset: false,
-    ///                 min_binding_size: None // this can be some like buffer size for performance?
+    ///                 min_binding_size: None 
     ///             },
     ///             count: None,
     ///         },
     ///         wgpu::BindGroupLayoutEntry{
-    ///             binding: 1, // this is where we will bind the ioutput in the shader
-    ///             visibility: wgpu::ShaderStages::COMPUTE, // the type of function this will be visible in
+    ///             binding: 1,
+    ///             visibility: wgpu::ShaderStages::COMPUTE, 
     ///             ty: wgpu::BindingType::Buffer {
-    ///                 ty: wgpu::BufferBindingType::Storage { read_only: true }, // Uniform buffer are faster than storage, but smaller in max size.
+    ///                 ty: wgpu::BufferBindingType::Storage { read_only: true }, 
     ///                 has_dynamic_offset: false,
-    ///                 min_binding_size: None // this can be some like buffer size for performance?
+    ///                 min_binding_size: None 
     ///             },
     ///             count: None,
     ///         }
@@ -139,10 +145,9 @@ impl Executor<'_> {
         self.device.create_bind_group(bind_group_descriptor)
     }
 
-    /// This methods gives a Buffer from a [`wgpu::util::BufferInitDescriptor`] object
+    /// This methods gives a [`wgpu::Buffer`] from a [`wgpu::util::BufferInitDescriptor`] object
     ///
-    /// It can be useful to be able to build the descriptor unlinked from the executor and
-    /// than only get the [`wgpu::Buffer`] only afterwards when the calculation is more ready to be performed
+    /// This method instantiates the buffer on the GPU, thus is reatively costly in time
     pub fn get_buffer_init(
         &self,
         buffer_init_descriptor: &wgpu::util::BufferInitDescriptor,
@@ -150,17 +155,18 @@ impl Executor<'_> {
         self.device.create_buffer_init(&buffer_init_descriptor)
     }
 
-    /// This method gives a buffer from a [`wgpu::BufferDescriptor`]
+    /// This method gives a [`wgpu::Buffer`] from a [`wgpu::BufferDescriptor`]
     ///
-    ///
+    /// The buffer is not instantiated, nor written, which is useful if the buffer writing
+    /// wants to be managd separately
     pub fn get_buffer(&self, buffer_descriptor: &wgpu::BufferDescriptor) -> wgpu::Buffer {
         self.device.create_buffer(&buffer_descriptor)
     }
 
     /// This method associates the [`Shader`] object to the executor, creating a module.
     ///
-    /// Note the method tdoesn't take ownership of the shader, and it allows for it to change and
-    /// be reused and associated with another executor module.
+    /// At this stage the [`Shader`] must be valid WGSL code, otherwise it will cause the 
+    /// program to # panic
     pub fn get_shader_module(&self, shader: &Shader) -> wgpu::ShaderModule {
         self.device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -181,10 +187,11 @@ impl Executor<'_> {
             .create_pipeline_layout(pipeline_layout_descriptor)
     }
 
-    pub fn get_command_encoder(&self, label: Option<&str>) -> wgpu::CommandEncoder {
-        self.device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label })
-    }
+    
+    // pub fn get_command_encoder(&self, label: Option<&str>) -> wgpu::CommandEncoder {
+    //     self.device
+    //         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label })
+    // }
 
     /// This method creates a [`wgpu::ComputePipeline`] from a pipeline descriptor
     ///
@@ -196,6 +203,9 @@ impl Executor<'_> {
         self.device.create_compute_pipeline(pipeline_descriptor)
     }
 
+    /// Gets a [`wgpu::CommandEncoder`] from the device associated with the [`Executor`]
+    /// 
+    /// Takes an optional *`label` string for debugging purposes
     pub fn create_encoder(&self, label: Option<&str>) -> wgpu::CommandEncoder {
         self.device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label })
@@ -203,9 +213,16 @@ impl Executor<'_> {
 
     /// This method adds a bind group and a pipeline to the [`Executor`] and calls the dispatch for the pipeline
     ///
-    /// Note this is still not executing any opration, this only adds to the command encoder the binding of the [`wgpu::BindGroup`],
-    /// sets up the [`wgpu::ComputePipeline`] and puts the dispatch command in queue.
-    /// To execute the command queue run [`Executor::execute()`] after the compute pass is
+    /// Note this is still not executing any opration, this only creates a command encoder, binds the [`wgpu::BindGroup`]
+    /// and sets up the [`wgpu::ComputePipeline`].
+    /// 
+    /// It returns the [`wgpu::CommandEncoder`] with all these operations already set.
+    /// 
+    /// # Arguments
+    /// *-`bind group` - the [`wgpu::BindGroup`] to bind
+    /// *-`pipeline` - the [`wgpu::ComputePipeline`] to use for computation
+    /// *-`worgroups` - the number of worgroups to use for dispatching the computation pipeline
+    /// *-`label` - an optional string for debugging purposes
     pub fn dispatch_bind_and_pipeline(
         &mut self,
         bind_group: &wgpu::BindGroup,
@@ -226,6 +243,14 @@ impl Executor<'_> {
         return encoder;
     }
 
+    /// Dispatches a [`wgpu::ComputePipeline`] without setting the bindings.
+    /// 
+    /// This should be used only when the bind group doesn't change between different dispatches.
+    /// 
+    /// # Arguments
+    /// *-`pipeline` - the [`wgpu::ComputePipeline`] to use for computation
+    /// *-`worgroups` - the number of worgroups to use for dispatching the computation pipeline
+    /// *-`label` - an optional string for debugging purposes
     pub fn dispatch_pipeline(
         &mut self,
         pipeline: &wgpu::ComputePipeline,
@@ -244,10 +269,16 @@ impl Executor<'_> {
         return encoder;
     }
 
+    /// Uses the queue associated to the [`Executor`] to write a [`wgpu::Buffer`] to the GPU
     pub fn write_buffer(&self, buffer: &wgpu::Buffer, data: &[u8]) {
         self.queue.write_buffer(buffer, 0, data);
     }
 
+    /// Takes an Iterator of [`wgpu::CommandBuffer`] and submits the jobs to the 
+    /// queue of the [`Executor`]
+    /// 
+    /// Note that all the [`wgpu::CommandBuffer`] in the [`Iterator`] will be executed in parallel
+    /// in the GPU
     pub fn execute<I: IntoIterator<Item = wgpu::CommandBuffer>>(
         &mut self,
         command_buffers: I,
@@ -255,6 +286,11 @@ impl Executor<'_> {
         self.queue.submit(command_buffers)
     }
 
+    /// Reads a [`wgpu::Buffer`] back from the GPU to the CPU
+    /// 
+    /// To do such it creates a staging buffer before writing back to the CPU.
+    /// This allows the comunication to the CPU to happen in parallel with other GPU operations, 
+    /// but still need to copy the buffer from GPU to GPU before, blocking any other operation during the porcess.
     pub async fn read_buffer(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
         let mut command_encoder =
             self.device

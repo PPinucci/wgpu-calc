@@ -9,13 +9,13 @@
 //! # Principal components:
 //! - [`Function`] is a struct which holds the definition of a function. It's a [`Shader`]
 //!     with an ['entry point'] which performs operations on some [`Variable`]
-//! - [`VariableBind`] is the link between a [`Variable`] and a 'bind group` defined in the shader`
+//! - [`VariableBind`] is the link between a [`Variable`] and a `bind group` defined in the shader code.
 //!     Each [`Variable`] can potentially have more than one bind in the [`Shader`] and the definition
 //!     is held in this struct
 //! - [`Algorithm`] is the operational part of this library, it collects instances of [`Function`]
-//!     and tries to translate them as efficiently as possible to a series of [`Operation`]
-//!     Once every function is inserted in the Algorithm, the [`Algorithm::finish`] method is used
-//!     to actually send everything to the GPU and do the calculations
+//!     and tries to translate them as efficiently as possible to a series of [`Solver`].
+//!     Once every function is inserted in the Algorithm, the [`Algorithm::run`] method is used
+//!     to perform the calculation on the GPU
 //!
 //!
 #![allow(dead_code)]
@@ -30,17 +30,17 @@ use std::sync::{Arc, Mutex};
 
 /// This struct is the container for the different operations to perform
 ///
-/// It helds all the necessary components to bind each [`Variable`],
-/// write the necessary buffers and execute the pipelines on the GPU.
-///
+/// It is used as a "container" for the [`Function`], which can be pushed inside it
+/// to be performed on the GPU. 
 /// The functions added to the [`Algorithm`] will be performed in series preserving
 /// the desired output.
 /// Some optimisation will be done in the future prior to executing the operations.
-/// # Example
-/// ```
-/// use wgpu_calc::algorithm::{Algorithm,Function, VariableBind};
-///
-/// ```
+/// 
+/// The [`Algorithm`] takes also care of instantiating an [`Executor`] at creation, which is responsible for the 
+/// comunication with the GPU.
+/// Ideally only one [`Algorithm`] should be created, and functions added to it sequentially to be executed a the correct time.
+/// 
+/// The struct is also reponsible of extracting the results of the calculation so that the data can be read back to the CPU at the end of the calculation.
 #[derive(Debug)]
 pub struct Algorithm<'a, V: Variable> {
     variables: Vec<StoredVariable<V>>,
@@ -52,21 +52,46 @@ pub struct Algorithm<'a, V: Variable> {
     solvers: Vec<Solver<V>>,
 }
 
+/// This struct is responsible of defining the operation to perform on the GPU
+/// 
+/// It combined the [`VariableBind`] with the defined [`Shader`] and his `entry point(s)` to 
+/// give the correct operation to execute on the GPU.
+/// 
+/// Notice that the [`Function`] is executed in the order on which it's added to the [`Algorithm`], 
+/// not in the order in which it is declared.
+/// 
+/// Multiple [`Function`]s can reference the same [`Shader`] and `entry point`, but one [`VariableBind`] must be
+/// created for each of them
 pub struct Function<'a, V: Variable> {
     shader: &'a Shader,
     entry_point: &'a str,
     variables: Vec<VariableBind<V>>,
 }
+
+/// Unit struct only for defining a [`VariableBind`] as mutable during the GPU calculations.
+/// 
+/// Currently all the [`VariableBind`] are created as mutable, until I become
+/// smart enough to implement the immutable side of it, which could potentilly
+/// make some more parallelisation possible
 #[derive(Debug)]
 pub struct Mutable;
+
+/// Unit struct to define a [`VariableBind`] as immutable during the GPU calculations.
+/// 
+/// Currently it's impossible to create an immutable [`VariableBind`], but in the future it 
+/// might be possible
 #[derive(Debug)]
 pub struct Immutable;
 
-#[derive(Debug)]
-/// This struct holds a pair of (variable, bind_no)
+
+/// This struct binds a [`Variable`] with a bind group in the shader
 ///
-/// It's useful for the Function to know which bind group to associate this
-/// variable to.
+/// It holds an Arc<Mutex> to the [`Variable`] so that multiple binds can be created for the
+/// same [`Variable`]. 
+/// 
+/// Currently all the [`VariableBind`] are [`Mutable`], i.e. they are trated like they will mutate during the 
+/// GPU operation. 
+#[derive(Debug)]
 pub struct VariableBind<V, Type = Mutable>
 where
     V: Variable,
@@ -76,6 +101,7 @@ where
     mutable: std::marker::PhantomData<Type>,
 }
 
+// holds the buffer references of the variable
 #[derive(Debug)]
 struct StoredVariable<V>
 where
@@ -86,14 +112,16 @@ where
     buffer_index: usize,
 }
 
+// holds the information of the inserted modules, shaders with different entry points
 #[derive(Debug, PartialEq, Clone)]
-pub(super) struct Module<'a> {
+struct Module<'a> {
     shader: &'a Shader,
     entry_point: Vec<&'a str>,
 }
 
+// Enum to deal in the future with the parallelisation of some [`Function`] execution
 #[derive(Debug)]
-pub enum Solver<V>
+enum Solver<V>
 where
     V: Variable,
 {
@@ -107,7 +135,14 @@ where
 impl<'a, V: Variable> Algorithm<'a, V> {
     /// Creates a new empty [`Algorithm`]
     ///
-    /// The [`Algorithm`] will not be instantiated with any [`Operation`], will just be empty
+    /// Other than creating the struct, it also creates a new [`Executor`], which will be responsble of
+    /// carrying out the operations.
+    /// # Arguments
+    ///* - `label` - an optional string reference to use for debugging purposes. 
+    /// 
+    /// Returns an [`anyhow::Error`] if the [`Executor`] fails to instantiate
+    /// # Panics
+    /// if the [`Executor`] initialisation
     pub async fn new(label: Option<&'a str>) -> Result<Algorithm<'a, V>, anyhow::Error> {
         let executor = Executor::new(label).await?;
         Ok(Algorithm {
@@ -120,10 +155,29 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         })
     }
 
+    /// This still needs implementations
+    /// 
+    /// In the future will be responsible of optimizing the [`Algorithm`] in such a way that
+    /// any operation which can be sent safely to the GPU in parallel (i.e. executing multiple parallel
+    /// operations in parallel) will be done.
     pub fn optimize(&mut self) {
         todo!()
     }
 
+    /// This method adds a [`Function`] to the [`Algorithm`], sheduling it for execution
+    /// 
+    /// With this method the operation defined in the [`Function`] is added to the list of 
+    /// operations which will be carried on the GPU.
+    /// The only action this takes is to write the [`Variable`] contained in the [`Function`] to
+    /// the GPU buffer.
+    /// 
+    /// Notice that buffer writing only takes place once for every builted [`Variable`], to avoid multiplication
+    /// of this operation.
+    /// 
+    /// Takes a mutable reference to `self`.
+    /// 
+    /// # Arguments
+    /// * - `function` - the [`Function`] to add to the [`Algorithm`]
     pub fn add_fun(&mut self, function: Function<'a, V>) {
         let f_label = stringify!(function);
         let f_var = function.variables;
@@ -152,7 +206,6 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     self.variables.len() + new_vars_count,
                     var.bind_group as usize,
                 ]);
-                // bind_flag = true;
                 new_vars_count += 1;
             }
         }
@@ -173,18 +226,11 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             self.buffers.push(buffer);
         }
 
-        // let mut bind_layouts = Vec::new();
-
         let mut operation_bind_layout_entries = Vec::new();
         let mut operation_bind_entries = Vec::new();
 
-        // let mut bind_group = None;
-
         for [var_pos, bind_group] in new_binds {
             let sto_var = &mut self.variables[var_pos];
-            // if !bind_flag && *sto_var.binds.last().unwrap() != bind_group {
-            //     bind_flag = true
-            // }
             operation_bind_layout_entries
                 .push(sto_var.get_bind_group_layout_entry(bind_group as u32));
             operation_bind_entries.push(wgpu::BindGroupEntry {
@@ -199,15 +245,12 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         };
         let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
 
-        // if bind_flag {
         let bind_group_desriptor = wgpu::BindGroupDescriptor {
             label: Some(f_label),
             layout: &bind_layout,
             entries: &operation_bind_entries,
         };
         let bind_group = self.executor.get_bind_group(&bind_group_desriptor);
-        // }
-        // bind_layouts.push(bind_layout);
 
         let module_pos;
         let entry_point_pos;
@@ -274,6 +317,18 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         });
     }
 
+    /// This method executes the calculation defined in [`Algorithm`] on the GPU
+    /// 
+    /// Notice this method consumes the list of operations sheduled during the [`Function`]s additions
+    /// and performs all the calculations on the GPU as defined in the shaders on the [`Variable`]s bond to
+    /// the bind groups as hey were defined in the [`Function`].
+    /// 
+    /// This method doesn't perform any ouput operation, i.e. once the calculation have been run, you need to extract the
+    /// [`Variable`] using the [`Algorithm::get_output_unmap`] method.
+    /// This is done to assure that only the needed variables are brought back to the CPU memory, not spending any more time than needed on this
+    /// operation.
+    /// 
+    /// Takes a mutable reference to `self`
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
         for solver in &mut self.solvers.drain(0..) {
             match solver {
@@ -302,9 +357,12 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     }
 
     /// This method overwrite the [`Variable`] *`var` with the ouptut of the calculation
+    /// 
+    /// reading from a GPU buffer is in general an expensive operation. This functions calls the 
+    /// correct method on the [`Executor`] to read the GPU buffer asycronously and with the least 
+    /// amount of effort possible.
     ///
     /// The function returns an error if the variable is not found in the [`Algorithm`] or
-    /// if the
     pub async fn get_output_unmap(&mut self, var: &Arc<Mutex<V>>) -> Result<(), anyhow::Error> {
         match self
             .variables
@@ -335,17 +393,13 @@ impl<V> Function<'_, V>
 where
     V: Variable,
 {
-    /// Creates a new function from the base entities
+    /// Creates a new function from a [`VariableBind`], a [`Shader`] and an `entry_point`
     ///
-    /// The aim of this object is basically to organize everything in one place, allowing to better organize the procedures
-    /// to pass the function to the GPU.
-    /// Note this struct only keeps a reference to the shader code, and indirectly to the Variable object
-    /// This is to avoid memory allocation, to speed up the initialisation process and to allow for modificatio of shaders and
-    /// variables up to the submission of the [`Algorithm`] to the GPU.
-    ///
+    /// Its primary purpose is organization of the code, bringing together the element which makes a GPU calculation possible.
+    /// 
     /// # Arguments
-    /// * - `shader` - a reference to a [`coding::Shader`] element, which contains the shader which will perform the operation
-    /// * - `entry_point` - the name of the function inside the ['shader`] which will execute the code
+    /// * - `shader` - a reference to a [`Shader`] element, which contains the shader which will perform the operation
+    /// * - `entry_point` - the name of the function inside the [`Shader`] which will execute the code
     /// *- `vars` - an array reference of [`VariableBind`] which will be the variables passed to the GPU (with the relative bind number)
     pub fn new<'a>(
         shader: &'a Shader,
@@ -366,14 +420,18 @@ where
 {
     /// Creates a new [`VariableBind`] from the variable and the binding group number
     ///
-    /// This associated the variable, and thus will associate the correct buffer, to the
-    /// bind group which has `bind_group` value inside the shader code.
-    /// The variable is set as "mutable" by default, as it is considered [`unsafe`] for it to be immutable.
-    /// To set as immuable use [`VariableBind::set_immutable`] method.
-    /// Read [`VariableBind::is_mutable`] method for further explanation
+    /// This associated the defined [`Variable`] with the bind group number defined in the
+    /// WGSL shader.
+    /// This way the GPU will associate the correct bind group to the [`Variable`] and will perform
+    /// the calculations on it.
+    /// 
+    /// Notice that since the [`Variable`] is inside an Arc<Mutex>, it's not entirely cloned,
+    /// only the pointer will be. This reduces the amount of oepration to perform, mantaining 
+    /// enough flexibility to reference the [`Variable`] from different points.
+    /// 
     /// # Arguments
-    /// * - `variable` - a reference to the variable to bind
-    /// * - `bind_group` - the bind group number the variabe will be associated with
+    /// * - `variable` - an Arc<Mutex> of the variable which is used in a certain [`Function`]
+    /// * - `bind_group` - the bind group number the variabe will be associated with in the WGSL shader
     pub fn new(variable: Arc<Mutex<V>>, bind_group: u32) -> VariableBind<V, Mutable> {
         // let variable = Arc::clone(Mutex::new(*var));
         VariableBind {
@@ -391,19 +449,19 @@ where
         true
     }
 
-    /// Sets the [`VariableBind`] to be immutable, thus read only
-    ///
-    /// It is not unsafe per se, but set as such to warn about the possible implications of this.
-    /// At the time of writing any variable can be set as read/write and set as immutable. This could potentially
-    /// cause concurrency problems when queueing the pipelines on tha GPU.
-    /// An immutable [`VariableBind`] is considered not to change during the calculation.
-    pub unsafe fn set_immutable(self) -> VariableBind<V, Immutable> {
-        VariableBind {
-            variable: self.variable,
-            bind_group: self.bind_group,
-            mutable: std::marker::PhantomData::<Immutable>,
-        }
-    }
+    // /// Sets the [`VariableBind`] to be immutable, thus read only
+    // ///
+    // /// It is not unsafe per se, but set as such to warn about the possible implications of this.
+    // /// At the time of writing any variable can be set as read/write and set as immutable. This could potentially
+    // /// cause concurrency problems when queueing the pipelines on tha GPU.
+    // /// An immutable [`VariableBind`] is considered not to change during the calculation.
+    // pub unsafe fn set_immutable(self) -> VariableBind<V, Immutable> {
+    //     VariableBind {
+    //         variable: self.variable,
+    //         bind_group: self.bind_group,
+    //         mutable: std::marker::PhantomData::<Immutable>,
+    //     }
+    // }
 }
 
 impl<'a, V> VariableBind<V, Immutable>
@@ -417,18 +475,11 @@ where
     /// The variable is set as "mutable" by default, as it is considered [`unsafe`] for it to be immutable.
     /// To set as immuable use [`VariableBind::set_immutable`] method.
     /// Read [`VariableBind::is_mutable`] method for further explanation
+    /// 
     /// # Arguments
     /// * - `variable` - a reference to the variable to bind
     /// * - `bind_group` - the bind group number the variabe will be associated with
-    // pub fn new_immutable(variable: &'a V, bind_group: u32) -> VariableBind<'a, V, Immutable> {
-    //     VariableBind {
-    //         variable,
-    //         bind_group,
-    //         mutable: std::marker::PhantomData::<Immutable>,
-    //     }
-    // }
-    /// Sets the variable as mutable
-    ///
+    /// 
     /// This tells the [`Algorithm`] that the variable coulbe be muted by a function
     pub fn set_mutable(self) -> VariableBind<V, Mutable> {
         VariableBind {
@@ -459,19 +510,19 @@ impl<V: Variable> StoredVariable<V> {
 }
 
 impl<'a> Module<'a> {
-    pub(super) fn new(shader: &'a Shader) -> Self {
+    fn new(shader: &'a Shader) -> Self {
         Self {
             shader,
             entry_point: Vec::new(),
         }
     }
 
-    pub(super) fn add_entry_point(&mut self, e_p: &'a str) -> usize {
+    fn add_entry_point(&mut self, e_p: &'a str) -> usize {
         self.entry_point.push(e_p);
         return self.entry_point.len() - 1;
     }
 
-    pub(super) fn find_entry_point(&self, e_p: &'a str) -> Option<usize> {
+    fn find_entry_point(&self, e_p: &'a str) -> Option<usize> {
         self.entry_point.iter().position(|&entry| entry == e_p)
     }
 }
