@@ -4,8 +4,11 @@
 //! using the [`wgpu`] crate and its functions.
 
 #![allow(dead_code)]
+use std::any;
+
 use crate::coding::Shader;
-use wgpu::util::DeviceExt;
+use anyhow::anyhow;
+use wgpu::{util::DeviceExt, InstanceFlags};
 
 /// Contains all the functions to interact with the GPU device in the machine.
 ///
@@ -66,8 +69,7 @@ impl Executor<'_> {
                 label,
             })
         } else {
-            println!("No adapter found for this machine");
-            return Err(wgpu::RequestDeviceError.into());
+            return Err(anyhow!("No adapter found for this phisical device"));
         }
     }
 
@@ -75,7 +77,9 @@ impl Executor<'_> {
     async fn find_adapter() -> Option<wgpu::Adapter> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(), // this is to get all the possible backends
-            dx12_shader_compiler: wgpu::Dx12Compiler::default(), // this is not the best choice dor DirectX, better use Dxc version with dlls that can be downloaded here https://github.com/microsoft/DirectXShaderCompiler/releases
+            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+            flags:InstanceFlags::VALIDATION,
+            gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
         });
 
         let adapter = instance
@@ -234,7 +238,10 @@ impl Executor<'_> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
         {
             let mut compute_pass =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: self.label });
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { 
+                    label: self.label,
+                    timestamp_writes: None,
+                });
             compute_pass.set_bind_group(0, bind_group, &[]);
             compute_pass.set_pipeline(pipeline);
             compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
@@ -261,7 +268,10 @@ impl Executor<'_> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
         {
             let mut compute_pass =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label });
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { 
+                    label, 
+                    timestamp_writes: None
+                });
             compute_pass.set_pipeline(pipeline);
             compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }

@@ -301,6 +301,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             let mut compute_pass =
                 command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(f_label),
+                    timestamp_writes: None,
                 });
             // if let Some(_) = bind_group {
             compute_pass.set_bind_group(0, &bind_group, &[]);
