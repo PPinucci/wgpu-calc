@@ -19,7 +19,7 @@
 //!
 //!
 #![allow(dead_code)]
-use anyhow::{anyhow, Ok};
+use anyhow::{anyhow};
 
 use crate::coding::Shader;
 use crate::interface::Executor;
@@ -48,7 +48,7 @@ pub struct Algorithm<'a, V: Variable> {
     buffers: Vec<wgpu::Buffer>,
     // operations: Vec<Operation<'a>>,
     label: Option<&'a str>,
-    executor: Executor<'a>,
+    executor: Arc<Mutex<Executor<'a>>>,
     solvers: Vec<Solver<V>>,
 }
 
@@ -129,6 +129,8 @@ where
         variables: Vec<Arc<Mutex<V>>>,
     },
     Parallel(Vec<Solver<V>>),
+
+    ReadBuffer(usize)
 }
 
 impl<'a, V: Variable> Algorithm<'a, V> {
@@ -143,7 +145,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// # Panics
     /// if the [`Executor`] initialisation
     pub async fn new(label: Option<&'a str>) -> Result<Algorithm<'a, V>, anyhow::Error> {
-        let executor = Executor::new(label).await?;
+        let executor = Arc::new(Mutex::new(Executor::new(label).await?));
         Ok(Algorithm {
             variables: Vec::new(),
             modules: Vec::new(),
@@ -180,7 +182,8 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     pub fn add_fun(&mut self, function: Function<'a, V>) {
         let f_label = stringify!(function);
         let f_var = function.variables;
-        let mut command_encoder = self.executor.create_encoder(Some(f_label));
+        let executor = self.executor.lock().unwrap();
+        let mut command_encoder = executor.create_encoder(Some(f_label));
 
         let variables: Vec<Arc<Mutex<V>>> =
             f_var.iter().map(|var| Arc::clone(&var.variable)).collect();
@@ -190,13 +193,12 @@ impl<'a, V: Variable> Algorithm<'a, V> {
         let mut new_vars = Vec::new();
         let mut new_binds = Vec::new();
         let mut new_vars_count = 0;
-        // let mut bind_flag = false;
 
         for var in f_var {
             if let Some(pos) = self
-                .variables
-                .iter()
-                .position(|sto_var| Arc::ptr_eq(&sto_var.variable, &var.variable))
+            .variables
+            .iter()
+            .position(|sto_var| Arc::ptr_eq(&sto_var.variable, &var.variable))
             {
                 new_binds.push([pos, var.bind_group as usize]);
             } else {
@@ -213,15 +215,16 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             let var = Arc::clone(&sto_var);
             let var_lock = var.lock().unwrap();
             let buffer_descriptor = var_lock.to_buffer_descriptor();
-
-            let buffer = self.executor.get_buffer(&buffer_descriptor);
-
+            
+            let buffer = executor.get_buffer(&buffer_descriptor);
+            
             self.variables.push(StoredVariable {
                 variable: Arc::clone(&var),
                 binds: vec![*var_bind],
                 buffer_index: self.buffers.len(),
             });
-            self.executor.write_buffer(&buffer, var_lock.byte_data());
+
+            executor.write_buffer(&buffer, var_lock.byte_data());
             self.buffers.push(buffer);
         }
 
@@ -242,14 +245,14 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             label: Some(f_label),
             entries: &operation_bind_layout_entries,
         };
-        let bind_layout = self.executor.get_bind_group_layout(&bind_layout_descriptor);
+        let bind_layout = executor.get_bind_group_layout(&bind_layout_descriptor);
 
         let bind_group_desriptor = wgpu::BindGroupDescriptor {
             label: Some(f_label),
             layout: &bind_layout,
             entries: &operation_bind_entries,
         };
-        let bind_group = self.executor.get_bind_group(&bind_group_desriptor);
+        let bind_group = executor.get_bind_group(&bind_group_desriptor);
 
         let module_pos;
         let entry_point_pos;
@@ -284,11 +287,10 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             push_constant_ranges: &[],
         };
 
-        let pipeline_layout = self
-            .executor
+        let pipeline_layout = executor
             .get_pipeline_layout(&pipeline_layout_descriptor);
 
-        let shader_module = self.executor.get_shader_module(shader);
+        let shader_module = executor.get_shader_module(shader);
 
         let pipeline_descriptor = wgpu::ComputePipelineDescriptor {
             label: Some(f_label),
@@ -296,7 +298,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             module: &shader_module,
             entry_point,
         };
-        let pipeline: wgpu::ComputePipeline = self.executor.get_pipeline(&pipeline_descriptor);
+        let pipeline: wgpu::ComputePipeline = executor.get_pipeline(&pipeline_descriptor);
         {
             let mut compute_pass =
                 command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -335,10 +337,10 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 Solver::Serial {
                     command_encoder, ..
                 } => {
-                    self.executor
-                        .execute([command_encoder.finish()].into_iter());
-                }
-
+                    let mut executor = self.executor.lock().unwrap();
+                    executor.execute([command_encoder.finish()].into_iter());
+                },
+                
                 Solver::Parallel(solvers) => {
                     let mut buffers = Vec::new();
                     for serial in solvers {
@@ -349,9 +351,20 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                             _ => return Err(anyhow!("Cannot nest multiple parallel solvers!")),
                         }
                     }
-                    self.executor.execute(buffers.into_iter());
+                    let mut executor = self.executor.lock().unwrap();
+                    executor.execute(buffers.into_iter());
+                },
+                
+                Solver::ReadBuffer(index) => {   
+                    let buffer_index = self.variables[index].buffer_index;
+                    let buffer = &self.buffers[buffer_index];
+                    let executor = self.executor.lock().unwrap();
+                    let output = executor.read_buffer(&buffer).await;
+                    
+                    let mut var_write = self.variables[index].variable.lock().unwrap();
+                    var_write.read_data(&output);   
                 }
-            }
+        }
         }
         Ok(())
     }
@@ -363,7 +376,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// amount of effort possible.
     ///
     /// The function returns an error if the variable is not found in the [`Algorithm`] or
-    pub async fn get_output_unmap(&mut self, var: &Arc<Mutex<V>>) -> Result<(), anyhow::Error> {
+    pub fn read_variable(&mut self, var: &Arc<Mutex<V>>) -> Result<(), anyhow::Error> {
         match self
             .variables
             .iter()
@@ -377,12 +390,13 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 ));
             }
             Some(index) => {
-                let buffer_index = self.variables[index].buffer_index;
-                let buffer = &self.buffers[buffer_index];
-                let output = self.executor.read_buffer(&buffer).await;
-                // let slice =
-                let mut var_write = self.variables[index].variable.lock().unwrap();
-                var_write.read_data(&output);
+                self.solvers.push(Solver::ReadBuffer(index));
+                // let buffer_index = self.variables[index].buffer_index;
+                // let buffer = &self.buffers[buffer_index];
+                // let output = self.executor.read_buffer(&buffer).await;
+                // // let slice =
+                // let mut var_write = self.variables[index].variable.lock().unwrap();
+                // var_write.read_data(&output);
                 return Ok(());
             }
         }

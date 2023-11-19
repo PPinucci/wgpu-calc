@@ -4,8 +4,6 @@
 //! using the [`wgpu`] crate and its functions.
 
 #![allow(dead_code)]
-use std::any;
-
 use crate::coding::Shader;
 use anyhow::anyhow;
 use wgpu::{util::DeviceExt, InstanceFlags};

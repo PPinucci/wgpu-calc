@@ -83,12 +83,12 @@ async fn add_1_test_new() {
     algorithm.add_fun(function);
 
     // print!("{:?}", algorithm.get_operations())
-
-    algorithm.run().await.unwrap();
-
     let output = Arc::clone(&var);
 
-    algorithm.get_output_unmap(&output).await.unwrap();
+    algorithm.read_variable(&output).unwrap();
+    algorithm.run().await.unwrap();
+
+
 
     let var_lock = var.lock().unwrap();
     let result = var_lock.to_array();
@@ -116,14 +116,11 @@ async fn add_1_large_new() {
     let function = Function::new(&shader, "add_1", bindings);
 
     algorithm.add_fun(function);
-
-    // print!("{:?}", algorithm.get_operations())
+    
+    let output = Arc::clone(&var);
+    algorithm.read_variable(&output).unwrap();
 
     algorithm.run().await.unwrap();
-
-    let output = Arc::clone(&var);
-
-    algorithm.get_output_unmap(&output).await.unwrap();
 
     let var_lock = var.lock().unwrap();
     let result = var_lock.to_array();
@@ -159,14 +156,14 @@ async fn add_1_two_buffers_new() {
     algorithm.add_fun(function1);
     algorithm.add_fun(function2);
 
-    algorithm.run().await.unwrap();
-
     let output_1 = Arc::clone(&var_1);
     let output_2 = Arc::clone(&var_2);
-
-    algorithm.get_output_unmap(&output_1).await.unwrap();
-    algorithm.get_output_unmap(&output_2).await.unwrap();
-
+    
+    algorithm.read_variable(&output_1).unwrap();
+    algorithm.read_variable(&output_2).unwrap();
+    
+    algorithm.run().await.unwrap();
+    
     let var_lock_1 = var_1.lock().unwrap();
     let var_lock_2 = var_2.lock().unwrap();
 
@@ -203,12 +200,12 @@ async fn add_1_two_binds_same_var_new() {
 
     algorithm.add_fun(function1);
     algorithm.add_fun(function2);
-
-    algorithm.run().await.unwrap();
-
+    
     let output_1 = Arc::clone(&var_1);
-
-    algorithm.get_output_unmap(&output_1).await.unwrap();
+    
+    algorithm.read_variable(&output_1).unwrap();
+    
+    algorithm.run().await.unwrap();
 
     let var_lock_1 = var_1.lock().unwrap();
 
@@ -240,18 +237,13 @@ async fn add_matrices_new() {
     let bindings_1 = vec![VariableBind::new(bind1, 0), VariableBind::new(bind2, 1)];
 
     let function1 = Function::new(&shader, "add_matrices", bindings_1);
-
+    
     algorithm.add_fun(function1);
-
-    // print!("{:?}", algorithm.get_operations())
-
+    
+    algorithm.read_variable(&var_1).unwrap();
+    algorithm.read_variable(&var_2).unwrap();
+    
     algorithm.run().await.unwrap();
-
-    // let output_1 = Arc::clone(&var_1);
-    // let output_2 = Arc::clone(&var_2);
-
-    algorithm.get_output_unmap(&var_1).await.unwrap();
-    algorithm.get_output_unmap(&var_2).await.unwrap();
 
     let var_lock_1 = var_1.lock().unwrap();
     let var_lock_2 = var_2.lock().unwrap();
