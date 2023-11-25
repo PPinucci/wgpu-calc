@@ -4,6 +4,8 @@
 //! using the [`wgpu`] crate and its functions.
 
 #![allow(dead_code)]
+use std::sync::{Arc, Mutex};
+
 use crate::coding::Shader;
 use anyhow::anyhow;
 use wgpu::{util::DeviceExt, InstanceFlags};
@@ -76,7 +78,7 @@ impl Executor<'_> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(), // this is to get all the possible backends
             dx12_shader_compiler: wgpu::Dx12Compiler::default(),
-            flags:InstanceFlags::VALIDATION,
+            flags: InstanceFlags::VALIDATION,
             gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
         });
 
@@ -235,11 +237,10 @@ impl Executor<'_> {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
         {
-            let mut compute_pass =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { 
-                    label: self.label,
-                    timestamp_writes: None,
-                });
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: self.label,
+                timestamp_writes: None,
+            });
             compute_pass.set_bind_group(0, bind_group, &[]);
             compute_pass.set_pipeline(pipeline);
             compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
@@ -265,11 +266,10 @@ impl Executor<'_> {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label });
         {
-            let mut compute_pass =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { 
-                    label, 
-                    timestamp_writes: None
-                });
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label,
+                timestamp_writes: None,
+            });
             compute_pass.set_pipeline(pipeline);
             compute_pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
         }
@@ -326,6 +326,45 @@ impl Executor<'_> {
         receiver
             .await
             .expect("communication failed")
+            .expect("buffer reading failed");
+        let slice: &[u8] = &staging_buffer.slice(..).get_mapped_range();
+        return slice.to_owned();
+    }
+
+    pub async fn read_buffer_thread_safe(&self, buffer: Arc<Mutex<wgpu::Buffer>>) -> Vec<u8> {
+        let mut command_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("copying command encoder"),
+                });
+
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+            size: buffer.lock().unwrap().size(),
+        });
+
+        command_encoder.copy_buffer_to_buffer(
+            &buffer.lock().unwrap(),
+            0,
+            &staging_buffer,
+            0,
+            staging_buffer.size(),
+        );
+
+        self.queue.submit(std::iter::once(command_encoder.finish()));
+
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        staging_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| {
+                let _ = sender.send(result);
+            });
+        self.device.poll(wgpu::Maintain::Wait); // TODO: poll in the background instead of blocking
+        receiver
+            .await
+            .expect("communication to GPU buffer failed")
             .expect("buffer reading failed");
         let slice: &[u8] = &staging_buffer.slice(..).get_mapped_range();
         return slice.to_owned();

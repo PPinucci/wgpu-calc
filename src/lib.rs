@@ -128,12 +128,12 @@ async fn main() {
     // written in the GPU buffer
     algorithm.add_fun(function);
 
-    
+
     // we need to use this method to extract a variable. This
     // operation is expensive since it copies data from the GPU to the CPU
     // this is why it's not done automatically for all the variables
     algorithm.read_variable(&var).unwrap();
-    
+
     // this phisically executes all the added functions on the GPU
     algorithm.run().await.unwrap();
     // here we put a lock on the variable to use it to extract the result

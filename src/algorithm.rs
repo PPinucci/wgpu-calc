@@ -19,14 +19,15 @@
 //!
 //!
 #![allow(dead_code)]
-use anyhow::{anyhow};
+use anyhow::anyhow;
+use std::fmt::Debug;
+use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use crate::coding::Shader;
 use crate::interface::Executor;
 use crate::variable::Variable;
-use std::fmt::Debug;
-use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
 
 /// This struct is the container for the different operations to perform
 ///
@@ -45,10 +46,10 @@ use std::sync::{Arc, Mutex};
 pub struct Algorithm<'a, V: Variable> {
     variables: Vec<StoredVariable<V>>,
     modules: Vec<Module<'a>>,
-    buffers: Vec<wgpu::Buffer>,
+    buffers: Arc<Mutex<Vec<wgpu::Buffer>>>,
     // operations: Vec<Operation<'a>>,
     label: Option<&'a str>,
-    executor: Arc<Mutex<Executor<'a>>>,
+    executor: Arc<Mutex<Executor<'static>>>,
     solvers: Vec<Solver<V>>,
 }
 
@@ -130,7 +131,7 @@ where
     },
     Parallel(Vec<Solver<V>>),
 
-    ReadBuffer(usize)
+    ReadBuffer(usize),
 }
 
 impl<'a, V: Variable> Algorithm<'a, V> {
@@ -144,12 +145,12 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// Returns an [`anyhow::Error`] if the [`Executor`] fails to instantiate
     /// # Panics
     /// if the [`Executor`] initialisation
-    pub async fn new(label: Option<&'a str>) -> Result<Algorithm<'a, V>, anyhow::Error> {
+    pub async fn new(label: Option<&'static str>) -> Result<Algorithm<'a, V>, anyhow::Error> {
         let executor = Arc::new(Mutex::new(Executor::new(label).await?));
         Ok(Algorithm {
             variables: Vec::new(),
             modules: Vec::new(),
-            buffers: Vec::new(),
+            buffers: Arc::new(Mutex::new(Vec::new())),
             solvers: Vec::new(),
             label,
             executor,
@@ -179,11 +180,15 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     ///
     /// # Arguments
     /// * - `function` - the [`Function`] to add to the [`Algorithm`]
-    pub fn add_fun(&mut self, function: Function<'a, V>) {
+    pub fn add_fun(&mut self, function: Function<'a, V>)
+    where
+        V: 'static,
+    {
         let f_label = stringify!(function);
         let f_var = function.variables;
         let executor = self.executor.lock().unwrap();
         let mut command_encoder = executor.create_encoder(Some(f_label));
+        // drop(executor);
 
         let variables: Vec<Arc<Mutex<V>>> =
             f_var.iter().map(|var| Arc::clone(&var.variable)).collect();
@@ -196,9 +201,9 @@ impl<'a, V: Variable> Algorithm<'a, V> {
 
         for var in f_var {
             if let Some(pos) = self
-            .variables
-            .iter()
-            .position(|sto_var| Arc::ptr_eq(&sto_var.variable, &var.variable))
+                .variables
+                .iter()
+                .position(|sto_var| Arc::ptr_eq(&sto_var.variable, &var.variable))
             {
                 new_binds.push([pos, var.bind_group as usize]);
             } else {
@@ -211,33 +216,39 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             }
         }
 
+        let mut var_buff_write = Vec::new();
         for (sto_var, [_, var_bind]) in new_vars.iter().zip(&new_binds) {
+            // let exec = Arc::clone(&self.executor);
             let var = Arc::clone(&sto_var);
+
             let var_lock = var.lock().unwrap();
             let buffer_descriptor = var_lock.to_buffer_descriptor();
-            
+            //  drop(var_lock);
             let buffer = executor.get_buffer(&buffer_descriptor);
-            
-            self.variables.push(StoredVariable {
-                variable: Arc::clone(&var),
-                binds: vec![*var_bind],
-                buffer_index: self.buffers.len(),
-            });
 
-            executor.write_buffer(&buffer, var_lock.byte_data());
-            self.buffers.push(buffer);
+            self.variables.push(StoredVariable {
+                variable: Arc::clone(&sto_var),
+                binds: vec![*var_bind],
+                buffer_index: self.buffers.lock().unwrap().len(),
+            });
+            var_buff_write.push(self.variables.len() - 1);
+            self.buffers.lock().unwrap().push(buffer);
         }
 
         let mut operation_bind_layout_entries = Vec::new();
         let mut operation_bind_entries = Vec::new();
+        let buffers = Arc::clone(&self.buffers);
+        let buffer_lock = buffers.lock().unwrap();
 
         for [var_pos, bind_group] in new_binds {
             let sto_var = &mut self.variables[var_pos];
             operation_bind_layout_entries
                 .push(sto_var.get_bind_group_layout_entry(bind_group as u32));
+            // let buffer = &buffers[sto_var.buffer_index];
+
             operation_bind_entries.push(wgpu::BindGroupEntry {
                 binding: bind_group as u32,
-                resource: self.buffers[sto_var.buffer_index].as_entire_binding(),
+                resource: buffer_lock[sto_var.buffer_index].as_entire_binding(),
             });
         }
 
@@ -253,6 +264,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             entries: &operation_bind_entries,
         };
         let bind_group = executor.get_bind_group(&bind_group_desriptor);
+        drop(buffer_lock);
 
         let module_pos;
         let entry_point_pos;
@@ -287,8 +299,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             push_constant_ranges: &[],
         };
 
-        let pipeline_layout = executor
-            .get_pipeline_layout(&pipeline_layout_descriptor);
+        let pipeline_layout = executor.get_pipeline_layout(&pipeline_layout_descriptor);
 
         let shader_module = executor.get_shader_module(shader);
 
@@ -317,6 +328,19 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             command_encoder,
             variables,
         });
+        drop(executor);
+        for index in var_buff_write {
+            let buffers = Arc::clone(&self.buffers);
+            let var2 = Arc::clone(&self.variables[index].variable);
+            let exec = Arc::clone(&self.executor);
+            let buff_index = self.variables[index].buffer_index;
+            let var_lock = var2.lock().unwrap();
+            let executor = exec.lock().unwrap();
+            let bufflock = buffers.lock().unwrap();
+            executor.write_buffer(&bufflock[buff_index], var_lock.byte_data());
+            // thread::spawn(move || {
+            // });
+        }
     }
 
     /// This method executes the calculation defined in [`Algorithm`] on the GPU
@@ -339,8 +363,8 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                 } => {
                     let mut executor = self.executor.lock().unwrap();
                     executor.execute([command_encoder.finish()].into_iter());
-                },
-                
+                }
+
                 Solver::Parallel(solvers) => {
                     let mut buffers = Vec::new();
                     for serial in solvers {
@@ -353,19 +377,25 @@ impl<'a, V: Variable> Algorithm<'a, V> {
                     }
                     let mut executor = self.executor.lock().unwrap();
                     executor.execute(buffers.into_iter());
-                },
-                
-                Solver::ReadBuffer(index) => {   
+                }
+
+                Solver::ReadBuffer(index) => {
                     let buffer_index = self.variables[index].buffer_index;
-                    let buffer = &self.buffers[buffer_index];
-                    let executor = self.executor.lock().unwrap();
-                    let output = executor.read_buffer(&buffer).await;
+                    let buffer = &self.buffers.lock().unwrap()[buffer_index];
+                    let exec = Arc::clone(&self.executor);
                     
                     let mut var_write = self.variables[index].variable.lock().unwrap();
-                    var_write.read_data(&output);   
+                    let exec_lock = exec.lock().unwrap();
+                    
+                    let result = exec_lock.read_buffer(buffer).await;
+                    
+                    var_write.read_data(&result);
+                //     tokio::spawn(async move {
+                // });
                 }
+            }
         }
-        }
+
         Ok(())
     }
 
