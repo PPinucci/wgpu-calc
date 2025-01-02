@@ -21,8 +21,10 @@
 #![allow(dead_code)]
 use anyhow::anyhow;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
+use wgpu::PipelineCompilationOptions;
 
 use crate::coding::Shader;
 use crate::interface::Executor;
@@ -42,7 +44,7 @@ use crate::variable::Variable;
 ///
 /// The struct is also reponsible of extracting the results of the calculation so that the data can be read back to the CPU at the end of the calculation.
 #[derive(Debug)]
-pub struct Algorithm<'a, V: Variable> {
+pub struct Algorithm<'a, V: Variable, State = Empty> {
     variables: Vec<StoredVariable<V>>,
     modules: Vec<Module<'a>>,
     buffers: Vec<wgpu::Buffer>,
@@ -50,7 +52,20 @@ pub struct Algorithm<'a, V: Variable> {
     label: Option<&'a str>,
     executor: Executor<'a>,
     solvers: Vec<Solver<V>>,
+    state: PhantomData<State>,
 }
+
+trait State {}
+trait Ready {}
+
+struct Empty;
+impl State for Empty {}
+struct Runnable;
+impl State for Runnable {}
+impl Ready for Runnable {}
+struct Calculated;
+impl State for Calculated {}
+impl Ready for Calculated {}
 
 /// This struct is responsible of defining the operation to perform on the GPU
 ///
@@ -133,7 +148,7 @@ where
     ReadBuffer(usize),
 }
 
-impl<'a, V: Variable> Algorithm<'a, V> {
+impl<'a, V: Variable> Algorithm<'a, V, Empty> {
     /// Creates a new empty [`Algorithm`]
     ///
     /// Other than creating the struct, it also creates a new [`Executor`], which will be responsble of
@@ -153,16 +168,8 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             solvers: Vec::new(),
             label,
             executor,
+            state: PhantomData::default(),
         })
-    }
-
-    /// This still needs implementations
-    ///
-    /// In the future will be responsible of optimizing the [`Algorithm`] in such a way that
-    /// any operation which can be sent safely to the GPU in parallel (i.e. executing multiple parallel
-    /// operations in parallel) will be done.
-    pub fn optimize(&mut self) {
-        todo!()
     }
 
     /// This method adds a [`Function`] to the [`Algorithm`], sheduling it for execution
@@ -179,7 +186,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     ///
     /// # Arguments
     /// * - `function` - the [`Function`] to add to the [`Algorithm`]
-    pub fn add_fun(&mut self, function: Function<'a, V>) {
+    pub fn add_fun(mut self, function: Function<'a, V>) -> Algorithm<'a, V, Runnable> {
         let f_label = stringify!(function);
         let f_var = function.variables;
         let mut command_encoder = self.executor.create_encoder(Some(f_label));
@@ -301,6 +308,10 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             layout: Some(&pipeline_layout),
             module: &shader_module,
             entry_point,
+            // TODO: look at how to leverage this for override expressions
+            compilation_options: PipelineCompilationOptions::default(),
+            // TODO: look at how to use this for better caching
+            cache: None,
         };
         let pipeline: wgpu::ComputePipeline = self.executor.get_pipeline(&pipeline_descriptor);
         {
@@ -321,6 +332,27 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             command_encoder,
             variables,
         });
+
+        Algorithm {
+            variables: self.variables,
+            modules: self.modules,
+            buffers: self.buffers,
+            label: self.label,
+            executor: self.executor,
+            solvers: self.solvers,
+            state: PhantomData::default(),
+        }
+    }
+}
+
+impl<'a, V: Variable, R: Ready> Algorithm<'a, V, R> {
+    /// This still needs implementations
+    ///
+    /// In the future will be responsible of optimizing the [`Algorithm`] in such a way that
+    /// any operation which can be sent safely to the GPU in parallel (i.e. executing multiple parallel
+    /// operations in parallel) will be done.
+    pub fn optimize(&mut self) {
+        todo!()
     }
 
     /// This method executes the calculation defined in [`Algorithm`] on the GPU
@@ -335,7 +367,7 @@ impl<'a, V: Variable> Algorithm<'a, V> {
     /// operation.
     ///
     /// Takes a mutable reference to `self`
-    pub async fn run(&mut self) -> Result<(), anyhow::Error> {
+    pub async fn run(mut self) -> Result<Algorithm<'a,V, Calculated>, anyhow::Error> {
         for solver in &mut self.solvers.drain(0..) {
             match solver {
                 Solver::Serial {
@@ -368,8 +400,19 @@ impl<'a, V: Variable> Algorithm<'a, V> {
             }
         }
 
-        Ok(())
+        Ok(Algorithm {
+            variables: self.variables,
+            modules: self.modules,
+            buffers: self.buffers,
+            label: self.label,
+            executor: self.executor,
+            solvers: self.solvers,
+            state: PhantomData::default(),
+        })
     }
+}
+
+impl<'a, V: Variable> Algorithm<'a, V, Calculated> {
 
     /// This method overwrite the [`Variable`] *`var` with the ouptut of the calculation
     ///

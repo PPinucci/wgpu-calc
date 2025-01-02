@@ -50,13 +50,14 @@ impl Executor<'_> {
             let (device, queue) = adapter
                 .request_device(
                     &wgpu::DeviceDescriptor {
-                        features: wgpu::Features::empty(), // this can be set to various values https://docs.rs/wgpu/latest/wgpu/struct.Features.html
-                        limits: if cfg!(target_arch = "wasm32") {
+                        required_features: wgpu::Features::empty(), // this can be set to various values https://docs.rs/wgpu/latest/wgpu/struct.Features.html
+                        required_limits: if cfg!(target_arch = "wasm32") {
                             wgpu::Limits::downlevel_webgl2_defaults()
                         } else {
                             wgpu::Limits::default()
                         },
                         label,
+                        memory_hints: wgpu::MemoryHints::Performance,
                     },
                     None, // Trace path 'used for API call tracing', probably a sort of log
                 )
@@ -373,6 +374,8 @@ impl Executor<'_> {
 
 #[cfg(test)]
 mod interface_test {
+    use wgpu::PipelineCompilationOptions;
+
     use super::*;
     #[tokio::test]
     async fn base_calc() {
@@ -468,6 +471,10 @@ mod interface_test {
             layout: Some(&pipeline_layout),
             module: &shader_module,
             entry_point,
+            // TODO: Add options in particular for override expressions
+            compilation_options: PipelineCompilationOptions::default(),
+            // TODO: Look at how we can improve cache with thiss
+            cache: None,
         };
 
         let pipeline: wgpu::ComputePipeline = executor.get_pipeline(&pipeline_descriptor);
